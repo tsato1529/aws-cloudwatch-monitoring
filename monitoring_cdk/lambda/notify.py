@@ -38,20 +38,13 @@ def handler(event, context):
         }
 
 def process_alarm_event(alarm_data: Dict[str, Any]):
-    """CloudWatchアラームイベントを処理"""
+    """CloudWatchアラームイベントを処理（動的設定取得版）"""
     
-    # 環境変数から設定を取得
+    # 環境変数から必要最小限の設定のみ取得
     email_sns_topic_arn = os.environ.get('EMAIL_SNS_TOPIC_ARN')
-    log_groups_config_str = os.environ.get('LOG_GROUPS_CONFIG')
     
-    if not email_sns_topic_arn or not log_groups_config_str:
-        raise ValueError("Required environment variables not set")
-    
-    # ロググループ設定をパース
-    try:
-        log_groups_config = json.loads(log_groups_config_str)
-    except json.JSONDecodeError:
-        raise ValueError("Invalid LOG_GROUPS_CONFIG format")
+    if not email_sns_topic_arn:
+        raise ValueError("EMAIL_SNS_TOPIC_ARN environment variable not set")
     
     # SNS経由のCloudWatchアラームイベントの構造に対応
     if 'AlarmName' in alarm_data:
@@ -77,15 +70,22 @@ def process_alarm_event(alarm_data: Dict[str, Any]):
     
     # アラーム状態がALARMの場合のみ処理
     if new_state == 'ALARM':
-        # アラーム名からロググループを特定
-        log_group_info = identify_log_group_from_alarm(alarm_name, log_groups_config)
-        if not log_group_info:
-            print(f"Warning: Could not identify log group for alarm: {alarm_name}")
+        try:
+            # アラーム情報から動的にロググループ情報を取得
+            log_group_info = get_log_group_info_from_alarm(alarm_name)
+            
+            log_group_name = log_group_info['log_group_name']
+            filter_pattern = log_group_info['filter_pattern']
+            display_name = log_group_info['display_name']
+            description = log_group_info['description']
+            
+            print(f"Dynamic config - Log Group: {log_group_name}")
+            print(f"Dynamic config - Filter Pattern: {filter_pattern}")
+            print(f"Dynamic config - Display Name: {display_name}")
+            
+        except Exception as e:
+            print(f"Error getting dynamic log group configuration: {e}")
             return
-        
-        log_group_name = log_group_info['name']
-        filter_pattern = log_group_info['config']['filter_pattern']
-        display_name = log_group_info['config']['display_name']
         
         print(f"Identified log group: {log_group_name}, filter: {filter_pattern}")
         
@@ -120,30 +120,242 @@ def process_alarm_event(alarm_data: Dict[str, Any]):
         # SNS経由でメール送信
         send_notification(email_sns_topic_arn, subject, body)
 
-def identify_log_group_from_alarm(alarm_name: str, log_groups_config: Dict[str, Any]) -> Dict[str, Any]:
-    """アラーム名からロググループを特定"""
+def get_log_group_info_from_alarm(alarm_name: str) -> Dict[str, str]:
+    """
+    CloudWatch APIを使用してアラームに関連するロググループとフィルターパターンを動的に取得
+    """
+    cloudwatch = boto3.client('cloudwatch')
+    logs_client = boto3.client('logs')
     
-    # アラーム名のパターン: LS-AWSLAB-{display_name}-Error-Alarm
-    for log_group_name, config in log_groups_config.items():
-        display_name = config['display_name']
-        expected_alarm_name = f"LS-AWSLAB-{display_name}-Error-Alarm"
+    try:
+        # 1. アラームの詳細情報を取得
+        response = cloudwatch.describe_alarms(AlarmNames=[alarm_name])
         
-        if alarm_name == expected_alarm_name:
-            return {
-                'name': log_group_name,
-                'config': config
-            }
+        if not response['MetricAlarms']:
+            raise ValueError(f"Alarm not found: {alarm_name}")
+        
+        alarm = response['MetricAlarms'][0]
+        metric_name = alarm['MetricName']
+        namespace = alarm['Namespace']
+        
+        print(f"Alarm metric: {namespace}/{metric_name}")
+        
+        # 2. アラーム名から直接ロググループ名を推定（新しい命名ルール）
+        log_group_name = infer_log_group_name_from_alarm_name(alarm_name)
+        
+        # フォールバック: メトリクス情報からも推定を試行
+        if not log_group_name:
+            log_group_name = infer_log_group_name_from_metric(metric_name, namespace)
+        
+        # 3. ロググループの存在確認
+        verify_log_group_exists(logs_client, log_group_name)
+        
+        # 4. メトリクスフィルターからフィルターパターンを取得
+        filter_pattern = get_filter_pattern_from_log_group(logs_client, log_group_name, metric_name)
+        
+        # 5. 表示名と説明を生成
+        display_name = generate_display_name(log_group_name)
+        description = generate_description(log_group_name, display_name)
+        
+        return {
+            "log_group_name": log_group_name,
+            "display_name": display_name,
+            "filter_pattern": filter_pattern,
+            "description": description
+        }
+        
+    except Exception as e:
+        print(f"Error getting log group info from alarm: {e}")
+        raise
+
+def infer_log_group_name_from_alarm_name(alarm_name: str) -> str:
+    """
+    アラーム名からロググループ名を直接推定
+    新しい命名ルール: アラーム名の最後の部分（-Error、-Warning等）をカットしてロググループ名とする
     
-    # 既存のアラーム名との互換性（MTA01の場合）
-    if alarm_name == "LS-AWSLAB-EC2-MTA01-Error-Alarm":
-        for log_group_name, config in log_groups_config.items():
-            if log_group_name == "LS-AWSLAB-EC2-MTA01-Log-messages":
-                return {
-                    'name': log_group_name,
-                    'config': config
-                }
+    例:
+    - "LS-AWSLAB-EC2-MTA01-Messages-Error" → "LS-AWSLAB-EC2-MTA01-Messages"
+    - "LS-AWSLAB-EC2-MTA01-App-Warning" → "LS-AWSLAB-EC2-MTA01-App"
+    - "LS-AWSLAB-API-Gateway-App-Critical" → "LS-AWSLAB-API-Gateway-App"
+    """
+    # アラーム名を"-"で分割
+    parts = alarm_name.split("-")
     
-    return None
+    if len(parts) > 1:
+        # 最後の部分がアラートレベル（Error、Warning、Critical等）と思われる場合は削除
+        last_part = parts[-1].lower()
+        alert_levels = ["error", "warning", "critical", "info", "debug", "alarm", "alert"]
+        
+        if last_part in alert_levels:
+            log_group_name = "-".join(parts[:-1])
+        else:
+            # 最後の部分がアラートレベルでない場合はそのまま使用
+            log_group_name = alarm_name
+    else:
+        # "-"が含まれていない場合はそのまま使用
+        log_group_name = alarm_name
+    
+    print(f"Inferred log group name from alarm '{alarm_name}': {log_group_name}")
+    return log_group_name
+
+def infer_log_group_name_from_metric(metric_name: str, namespace: str) -> str:
+    """
+    メトリクス名と名前空間からロググループ名を推定（後方互換性のため保持）
+    """
+    if namespace == "LS-AWSLAB-ErrorMonitoring":
+        # 新しい命名規則: "EC2-MTA01-Messages-Error" → "LS-AWSLAB-EC2-MTA01-Messages"
+        log_group_suffix = metric_name.replace("-Error", "")
+        log_group_name = f"LS-AWSLAB-{log_group_suffix}"
+            
+    elif namespace == "LS-AWSLAB-EC2-MTA01":
+        # 既存の命名規則（後方互換性）
+        if "messages" in metric_name.lower():
+            log_group_name = "LS-AWSLAB-EC2-MTA01-Log-messages"
+        elif "app" in metric_name.lower():
+            log_group_name = "LS-AWSLAB-EC2-MTA01-Log-app"
+        else:
+            log_group_name = "LS-AWSLAB-EC2-MTA01-Log-messages"  # デフォルト
+    else:
+        raise ValueError(f"Unknown namespace: {namespace}")
+    
+    return log_group_name
+
+def verify_log_group_exists(logs_client, log_group_name: str):
+    """
+    ロググループの存在確認
+    """
+    try:
+        response = logs_client.describe_log_groups(
+            logGroupNamePrefix=log_group_name,
+            limit=1
+        )
+        
+        if not response['logGroups'] or response['logGroups'][0]['logGroupName'] != log_group_name:
+            raise ValueError(f"Log group not found: {log_group_name}")
+            
+        print(f"Log group verified: {log_group_name}")
+        
+    except Exception as e:
+        print(f"Error verifying log group: {e}")
+        raise
+
+def get_filter_pattern_from_log_group(logs_client, log_group_name: str, metric_name: str) -> str:
+    """
+    ロググループのメトリクスフィルターから実際のフィルターパターンを取得
+    """
+    try:
+        # ロググループのメトリクスフィルターを取得
+        response = logs_client.describe_metric_filters(
+            logGroupName=log_group_name
+        )
+        
+        metric_filters = response.get('metricFilters', [])
+        
+        if not metric_filters:
+            print(f"No metric filters found for log group: {log_group_name}")
+            # フォールバック: ロググループ名から推定
+            return infer_filter_pattern_from_log_group_name(log_group_name)
+        
+        # 複数のメトリクスフィルターがある場合、メトリクス名で特定
+        target_filter = None
+        for filter_info in metric_filters:
+            for transformation in filter_info.get('metricTransformations', []):
+                if transformation.get('metricName') == metric_name:
+                    target_filter = filter_info
+                    break
+            if target_filter:
+                break
+        
+        if target_filter:
+            filter_pattern = target_filter.get('filterPattern', '')
+            print(f"Found filter pattern from metric filter: {filter_pattern}")
+            return filter_pattern
+        else:
+            # メトリクス名が一致しない場合、最初のフィルターを使用
+            filter_pattern = metric_filters[0].get('filterPattern', '')
+            print(f"Using first available filter pattern: {filter_pattern}")
+            return filter_pattern
+            
+    except Exception as e:
+        print(f"Error getting filter pattern from metric filters: {e}")
+        # フォールバック: ロググループ名から推定
+        return infer_filter_pattern_from_log_group_name(log_group_name)
+
+def infer_filter_pattern_from_log_group_name(log_group_name: str) -> str:
+    """
+    ロググループ名からフィルターパターンを推定（フォールバック用）
+    新しい命名ルール対応
+    """
+    log_group_lower = log_group_name.lower()
+    
+    # 新しい命名ルール: ロググループ名の末尾で判定
+    if log_group_lower.endswith("-messages"):
+        return "[error]"
+    elif log_group_lower.endswith("-app"):
+        return "ERROR"
+    # 後方互換性: 古い命名規則
+    elif "log-messages" in log_group_lower:
+        return "[error]"
+    elif "log-app" in log_group_lower:
+        return "ERROR"
+    else:
+        return "ERROR"  # デフォルト
+
+def generate_display_name(log_group_name: str) -> str:
+    """
+    ロググループ名から表示名を生成
+    新しい命名ルール: ロググループ名から"LS-AWSLAB-"プレフィックスを削除
+    """
+    # "LS-AWSLAB-EC2-MTA01-Messages" → "EC2-MTA01-Messages"
+    if log_group_name.startswith("LS-AWSLAB-"):
+        display_name = log_group_name.replace("LS-AWSLAB-", "")
+    else:
+        display_name = log_group_name
+    
+    # 後方互換性: 古い命名規則にも対応
+    if display_name.endswith("-Log-messages"):
+        display_name = display_name.replace("-Log-messages", "-Messages")
+    elif display_name.endswith("-Log-app"):
+        display_name = display_name.replace("-Log-app", "-App")
+    
+    return display_name
+
+def generate_description(log_group_name: str, display_name: str) -> str:
+    """
+    ロググループの説明を生成
+    新しい命名ルール対応
+    """
+    log_group_lower = log_group_name.lower()
+    
+    # 新しい命名ルール: ロググループ名の末尾で判定
+    if log_group_lower.endswith("-messages"):
+        log_type = "システムメッセージ"
+    elif log_group_lower.endswith("-app"):
+        log_type = "アプリケーション"
+    # 後方互換性: 古い命名規則
+    elif "log-messages" in log_group_lower:
+        log_type = "システムメッセージ"
+    elif "log-app" in log_group_lower:
+        log_type = "アプリケーション"
+    else:
+        log_type = "アプリケーション"
+    
+    # インスタンス/サービス名を抽出
+    if "EC2-MTA01" in display_name:
+        instance_name = "EC2インスタンス(MTA01)"
+    elif "API-Gateway" in display_name:
+        instance_name = "API Gateway"
+    elif "Lambda" in display_name:
+        instance_name = "Lambda関数"
+    else:
+        # 汎用的な抽出: 最初の部分を使用
+        parts = display_name.split("-")
+        if len(parts) >= 2:
+            instance_name = f"{parts[0]}-{parts[1]}"
+        else:
+            instance_name = parts[0] if parts else display_name
+    
+    return f"{instance_name}の{log_type}ログ"
 
 def extract_datapoint_timestamp_from_reason(state_reason: str) -> Optional[str]:
     """

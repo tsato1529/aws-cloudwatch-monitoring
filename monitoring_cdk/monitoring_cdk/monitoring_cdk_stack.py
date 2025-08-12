@@ -57,15 +57,7 @@ class MonitoringCdkStack(Stack):
             code=lambda_.DockerImageCode.from_image_asset("lambda"),
             timeout=Duration.minutes(5),
             environment={
-                "EMAIL_SNS_TOPIC_ARN": self.email_notification_topic.topic_arn,
-                # ロググループ設定をJSON形式で環境変数に設定
-                "LOG_GROUPS_CONFIG": json.dumps({
-                    config["name"]: {
-                        "display_name": config["display_name"],
-                        "filter_pattern": config["filter_pattern"],
-                        "description": config["description"]
-                    } for config in log_groups_config
-                })
+                "EMAIL_SNS_TOPIC_ARN": self.email_notification_topic.topic_arn
             }
         )
         
@@ -84,6 +76,19 @@ class MonitoringCdkStack(Stack):
                     "logs:DescribeLogStreams"
                 ],
                 resources=log_group_arns
+            )
+        )
+        
+        # 動的設定取得のための追加権限
+        notify_function.add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "cloudwatch:DescribeAlarms",
+                    "logs:DescribeLogGroups",
+                    "logs:DescribeMetricFilters"
+                ],
+                resources=["*"]
             )
         )
         
