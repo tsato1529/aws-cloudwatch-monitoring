@@ -2,19 +2,8 @@
   "Records": [
     {
       "EventSource": "aws:sns",
-      "EventVersion": "1.0",
-      "EventSubscriptionArn": "arn:aws:sns:ap-northeast-1:272540649730:LS-AWSLAB-CloudWatchAlarmProcessing:12345678-1234-1234-1234-123456789012",
       "Sns": {
-        "Type": "Notification",
-        "MessageId": "12345678-1234-1234-1234-123456789012",
-        "TopicArn": "arn:aws:sns:ap-northeast-1:272540649730:LS-AWSLAB-CloudWatchAlarmProcessing",
-        "Subject": "ALARM: \"LS-AWSLAB-EC2-MTA01-Messages-Error-Alarm\" in Asia Pacific (Tokyo)",
-        "Message": "{\"AlarmName\":\"LS-AWSLAB-EC2-MTA01-Messages-Error-Alarm\",\"AlarmDescription\":\"EC2インスタンス(MTA01)のシステムメッセージログでエラーが検出されました\",\"AWSAccountId\":\"272540649730\",\"NewStateValue\":\"ALARM\",\"NewStateReason\":\"Threshold Crossed: 1 datapoint [1.0 (08/01/25 12:00:00)] was greater than the threshold (1.0).\",\"StateChangeTime\":\"2025-01-08T12:00:00.000Z\",\"Region\":\"Asia Pacific (Tokyo)\",\"AlarmArn\":\"arn:aws:cloudwatch:ap-northeast-1:272540649730:alarm:LS-AWSLAB-EC2-MTA01-Messages-Error-Alarm\"}",
-        "Timestamp": "2025-01-08T12:00:00.000Z",
-        "SignatureVersion": "1",
-        "Signature": "example-signature",
-        "SigningCertUrl": "https://sns.ap-northeast-1.amazonaws.com/SimpleNotificationService-example.pem",
-        "UnsubscribeUrl": "https://sns.ap-northeast-1.amazonaws.com/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:ap-northeast-1:272540649730:LS-AWSLAB-CloudWatchAlarmProcessing:12345678-1234-1234-1234-123456789012"
+        "Message": "{\"AlarmName\":\"Test-Error-Alarm\",\"AlarmDescription\":\"テスト用アラーム\",\"NewStateValue\":\"ALARM\",\"NewStateReason\":\"Threshold Crossed: 1 datapoint [1.0 (08/01/25 12:00:00)] was greater than the threshold (1.0).\",\"StateChangeTime\":\"2025-01-08T12:00:00.000Z\"}"
       }
     }
   ]

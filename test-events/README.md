@@ -6,6 +6,7 @@
 
 ### `lambda-test-event.json`
 CloudWatchアラームからSNS経由でLambda関数に送られるイベントのサンプルです。
+**環境に依存しない汎用的なテストイベント**として設計されており、そのまま貼り付けて使用できます。
 
 ## 使用方法
 
@@ -18,6 +19,13 @@ CloudWatchアラームからSNS経由でLambda関数に送られるイベント�
 5. **JSONエディタ**で `lambda-test-event.json` の内容をコピー&ペースト
 6. **作成** ボタンをクリック
 7. **テスト** ボタンでテスト実行
+
+### 2. 汎用的な設計
+
+このテストイベントは以下の特徴があります：
+- **環境非依存**: アカウントIDやARNに依存しない
+- **最小限の情報**: Lambda関数の動作確認に必要な情報のみ
+- **そのまま使用可能**: 修正不要でどの環境でも動作
 
 ### 2. テストイベントの構造
 
@@ -43,22 +51,18 @@ CloudWatchアラームからSNS経由でLambda関数に送られるイベント�
 - **NewStateReason**: 状態変更の理由
 - **StateChangeTime**: 状態変更時刻
 
-### 4. カスタマイズ
+### 4. テストイベントの内容
 
-環境に応じて以下を変更してください：
+#### 含まれる情報
+- **AlarmName**: `Test-Error-Alarm` (汎用的なテスト用アラーム名)
+- **AlarmDescription**: `テスト用アラーム`
+- **NewStateValue**: `ALARM` (アラーム状態)
+- **NewStateReason**: 閾値超過の理由
+- **StateChangeTime**: 状態変更時刻
 
-#### ARN情報
-- **EventSubscriptionArn**: SNSサブスクリプションARN
-- **TopicArn**: SNSトピックARN
-- **AlarmArn**: CloudWatchアラームARN
-
-#### アカウント情報
-- **AWSAccountId**: AWSアカウントID
-- **Region**: リージョン名
-
-#### アラーム情報
-- **AlarmName**: 実際のアラーム名
-- **AlarmDescription**: 実際のアラーム説明
+#### 環境固有の情報は含まない
+- アカウントID、ARN、リージョンなどの環境固有情報は除外
+- Lambda関数の動作確認に必要最小限の情報のみ
 
 ### 5. デバッグ用テスト手順
 
