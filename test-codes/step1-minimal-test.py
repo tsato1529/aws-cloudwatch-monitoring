@@ -1,6 +1,6 @@
 import json
 
-def handler(event, context):
+def lambda_handler(event, context):
     print("=== MINIMAL TEST STARTED ===")
     print(f"Event received: {json.dumps(event, default=str)}")
     print("=== MINIMAL TEST COMPLETED ===")

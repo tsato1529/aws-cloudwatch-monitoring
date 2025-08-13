@@ -5,7 +5,7 @@ import re
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 
-def handler(event, context):
+def lambda_handler(event, context):
     print("=== TEST WITH ALL IMPORTS ===")
     print(f"Event received: {json.dumps(event, default=str)}")
     print(f"EMAIL_SNS_TOPIC_ARN: {os.environ.get('EMAIL_SNS_TOPIC_ARN')}")

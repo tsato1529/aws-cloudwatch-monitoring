@@ -2,7 +2,7 @@ import json
 import os
 import boto3
 
-def handler(event, context):
+def lambda_handler(event, context):
     print("=== TEST WITH BOTO3 ===")
     print(f"Event received: {json.dumps(event, default=str)}")
     print(f"EMAIL_SNS_TOPIC_ARN: {os.environ.get('EMAIL_SNS_TOPIC_ARN')}")

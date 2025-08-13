@@ -5,7 +5,7 @@ import re
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 
-def handler(event, context):
+def lambda_handler(event, context):
     print("=== LAMBDA FUNCTION STARTED ===")
     print(f"Event type: {type(event)}")
     print(f"Event keys: {list(event.keys()) if isinstance(event, dict) else 'Not a dict'}")
