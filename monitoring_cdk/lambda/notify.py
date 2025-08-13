@@ -6,21 +6,43 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 
 def handler(event, context):
+    print("=== LAMBDA FUNCTION STARTED ===")
+    print(f"Event type: {type(event)}")
+    print(f"Event keys: {list(event.keys()) if isinstance(event, dict) else 'Not a dict'}")
     print("=== EVENT RECEIVED ===")
-    print(json.dumps(event))
+    print(json.dumps(event, indent=2, default=str))
     
     try:
+        print("=== CHECKING ENVIRONMENT VARIABLES ===")
+        email_sns_topic_arn = os.environ.get('EMAIL_SNS_TOPIC_ARN')
+        print(f"EMAIL_SNS_TOPIC_ARN: {email_sns_topic_arn}")
+        
+        if not email_sns_topic_arn:
+            print("ERROR: EMAIL_SNS_TOPIC_ARN environment variable not set")
+            raise ValueError("EMAIL_SNS_TOPIC_ARN environment variable not set")
+        
+        print("=== PROCESSING EVENT ===")
         # CloudWatchアラームからのイベントを処理
         if 'Records' in event:
+            print("Processing SNS Records...")
             # SNS経由でのイベント
-            for record in event['Records']:
-                if record['EventSource'] == 'aws:sns':
+            for i, record in enumerate(event['Records']):
+                print(f"Record {i}: EventSource = {record.get('EventSource', 'Unknown')}")
+                if record.get('EventSource') == 'aws:sns':
+                    print(f"SNS Record found. Message content:")
                     message = json.loads(record['Sns']['Message'])
+                    print(json.dumps(message, indent=2, default=str))
+                    print("Calling process_alarm_event...")
                     process_alarm_event(message)
+                    print("process_alarm_event completed")
+                else:
+                    print(f"Unknown event source: {record.get('EventSource')}")
         else:
+            print("Processing direct CloudWatch alarm event...")
             # 直接のCloudWatchアラームイベント
             process_alarm_event(event)
             
+        print("=== FUNCTION COMPLETED SUCCESSFULLY ===")
         return {
             "statusCode": 200,
             "body": json.dumps({
@@ -29,7 +51,11 @@ def handler(event, context):
         }
         
     except Exception as e:
-        print(f"Error processing event: {str(e)}")
+        print(f"=== ERROR OCCURRED ===")
+        print(f"Error type: {type(e)}")
+        print(f"Error message: {str(e)}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
         return {
             "statusCode": 500,
             "body": json.dumps({
