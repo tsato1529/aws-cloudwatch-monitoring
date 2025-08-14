@@ -368,6 +368,18 @@ def infer_filter_pattern_from_log_group_name(log_group_name: str) -> str:
     
     return display_name
 
+def generate_display_name(log_group_name: str) -> str:
+    """ロググループ名から表示名を生成（後方互換に配慮）"""
+    base = log_group_name
+    if base.startswith("LS-AWSLAB-"):
+        base = base.replace("LS-AWSLAB-", "", 1)
+    if base.endswith("-Log-messages"):
+        base = base.replace("-Log-messages", "-Messages")
+    elif base.endswith("-Log-app"):
+        base = base.replace("-Log-app", "-App")
+    return base
+
+
 def generate_description(log_group_name: str) -> str:
     """
     ロググループの説明を生成
