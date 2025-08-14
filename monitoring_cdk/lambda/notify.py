@@ -111,22 +111,15 @@ def process_alarm_event(alarm_data: Dict[str, Any]):
             
         except Exception as e:
             print(f"Error getting dynamic log group configuration: {e}")
-            # フォールバック: アラーム名から推定して処理を継続
+            # フォールバック: アラーム名から推定して処理を継続（最小ルール）
             base = alarm_name
             if base.endswith('-Alarm'):
                 base = base[:-len('-Alarm')]
             for suf in ('-Error', '-Warning', '-Critical', '-Info', '-Debug', '-Alert'):
-                if base.endswith(suf):
+                if base.lower().endswith(suf.lower()):
                     base = base[:-len(suf)]
                     break
-            if not base.startswith('LS-AWSLAB-'):
-                base = f'LS-AWSLAB-{base}'
-            if base.endswith('-Messages'):
-                log_group_name = base.replace('-Messages', '-Log-messages')
-            elif base.endswith('-App'):
-                log_group_name = base.replace('-App', '-Log-app')
-            else:
-                log_group_name = base
+            log_group_name = base
             filter_pattern = infer_filter_pattern_from_log_group_name(log_group_name)
             display_name = generate_display_name(log_group_name)
             description = generate_description(log_group_name)
@@ -218,37 +211,21 @@ def get_log_group_info_from_alarm(alarm_name: str) -> Dict[str, str]:
 
 def infer_log_group_name_from_alarm_name(alarm_name: str) -> str:
     """
-    アラーム名からロググループ名を直接推定（CDK命名規則対応）
-    - 末尾の複合サフィックス（-Error-Alarm, -Warning-Alarm, -Critical-Alarm, -Alarm など）を除去
-    - DisplayName末尾の種別をロググループ末尾の表記に変換
-      * -Messages → -Log-messages
-      * -App      → -Log-app
-    - ロググループ名は "LS-AWSLAB-" プレフィックスを付与
-    例:
-      AlarmName: "LS-AWSLAB-EC2-MTA01-Messages-Error-Alarm"
-      → Base: "LS-AWSLAB-EC2-MTA01-Messages"
-      → LogGroup: "LS-AWSLAB-EC2-MTA01-Log-messages"
+    アラーム名からロググループ名を推定（汎用・最小ルール）
+    規約: アラーム名 = <LogGroupName>-<Severity>-Alarm
+    → ロググループ名は、末尾の "-Alarm" と "-<Severity>" を順に取り除いたもの
+    （Severityは Error/Warning/Critical/Info/Debug/Alert を想定。大文字小文字は区別しない）
     """
     base = alarm_name
-    # 末尾に -Alarm があれば除去
+    # 末尾の -Alarm を除去
     if base.endswith("-Alarm"):
         base = base[: -len("-Alarm")]
-    # 末尾に -Error, -Warning, -Critical, -Info, -Debug, -Alert があれば除去
-    for suf in ("-Error", "-Warning", "-Critical", "-Info", "-Debug", "-Alert"):
-        if base.endswith(suf):
+    # 末尾の Severity を除去（大小文字を問わず）
+    severities = ("-Error", "-Warning", "-Critical", "-Info", "-Debug", "-Alert")
+    for suf in severities:
+        if base.lower().endswith(suf.lower()):
             base = base[: -len(suf)]
             break
-
-    # 先頭に LS-AWSLAB- が無ければ付与
-    if not base.startswith("LS-AWSLAB-"):
-        base = f"LS-AWSLAB-{base}"
-
-    # DisplayNameの末尾をロググループ表記に変換
-    if base.endswith("-Messages"):
-        base = base.replace("-Messages", "-Log-messages")
-    elif base.endswith("-App"):
-        base = base.replace("-App", "-Log-app")
-
     print(f"Inferred log group name from alarm '{alarm_name}': {base}")
     return base
 
