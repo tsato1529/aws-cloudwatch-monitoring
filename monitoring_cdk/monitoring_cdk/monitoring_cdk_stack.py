@@ -7,6 +7,7 @@ from aws_cdk import (
     aws_cloudwatch as cloudwatch,
     aws_cloudwatch_actions as cw_actions,
     aws_iam as iam,
+    aws_logs as logs,
     Duration
 )
 from constructs import Construct
@@ -103,6 +104,9 @@ class MonitoringCdkStack(Stack):
         # 各ロググループに対してメトリクスフィルターとアラームを作成
         self._create_monitoring_resources(log_groups_config, notify_function)
 
+        # LambdaにメールSNSトピックのpublishを許可
+        self.email_notification_topic.grant_publish(notify_function)
+
     def _create_monitoring_resources(self, log_groups_config, notify_function):
         """各ロググループに対してメトリクスフィルターとアラームを作成"""
         
@@ -111,13 +115,16 @@ class MonitoringCdkStack(Stack):
             display_name = config["display_name"]
             filter_pattern = config["filter_pattern"]
             description = config["description"]
+
+            # アラームID（リソース名に使用）
+            alarm_id = display_name.replace("-", "")
             
             # メトリクス名前空間とメトリクス名を生成
             namespace = f"LS-AWSLAB-ErrorMonitoring"
             metric_name = f"{display_name}-Error"
             
             # 既存のメトリクスフィルターをチェック（MTA01-Messagesのみ既存）
-            if log_group_name == "LS-AWSLAB-EC2-MTA01-Log-messages":
+            if log_group_name == "LS-AWSLAB-EC2-MTA01-Log-messages": 
                 # 既存のメトリクスを使用
                 error_metric = cloudwatch.Metric(
                     namespace="LS-AWSLAB-EC2-MTA01",
@@ -127,7 +134,17 @@ class MonitoringCdkStack(Stack):
                 )
                 print(f"Using existing metric: LS-AWSLAB-EC2-MTA01/LS-AWSLAB-EC2-MTA01-Log-messages-Error")
             else:
-                # 新しいメトリクスフィルターを作成
+                # 新しいメトリクスフィルターを作成（CloudWatch Logs Metric Filter）
+                lg = logs.LogGroup.from_log_group_name(self, f"LogGroup{alarm_id}", log_group_name)
+                logs.MetricFilter(
+                    self, f"MetricFilter{alarm_id}",
+                    log_group=lg,
+                    filter_pattern=logs.FilterPattern.literal(filter_pattern),
+                    metric_namespace=namespace,
+                    metric_name=metric_name,
+                    default_value=0
+                )
+                # そのメトリクスを参照する
                 error_metric = cloudwatch.Metric(
                     namespace=namespace,
                     metric_name=metric_name,

@@ -111,7 +111,29 @@ def process_alarm_event(alarm_data: Dict[str, Any]):
             
         except Exception as e:
             print(f"Error getting dynamic log group configuration: {e}")
-            return
+            # フォールバック: アラーム名から推定して処理を継続
+            base = alarm_name
+            if base.endswith('-Alarm'):
+                base = base[:-len('-Alarm')]
+            for suf in ('-Error', '-Warning', '-Critical', '-Info', '-Debug', '-Alert'):
+                if base.endswith(suf):
+                    base = base[:-len(suf)]
+                    break
+            if not base.startswith('LS-AWSLAB-'):
+                base = f'LS-AWSLAB-{base}'
+            if base.endswith('-Messages'):
+                log_group_name = base.replace('-Messages', '-Log-messages')
+            elif base.endswith('-App'):
+                log_group_name = base.replace('-App', '-Log-app')
+            else:
+                log_group_name = base
+            filter_pattern = infer_filter_pattern_from_log_group_name(log_group_name)
+            display_name = generate_display_name(log_group_name)
+            description = generate_description(log_group_name)
+            print('[Fallback] Using inferred config from alarm name')
+            print(f"[Fallback] Log Group: {log_group_name}")
+            print(f"[Fallback] Filter Pattern: {filter_pattern}")
+            print(f"[Fallback] Display Name: {display_name}")
         
         print(f"Identified log group: {log_group_name}, filter: {filter_pattern}")
         
@@ -135,8 +157,8 @@ def process_alarm_event(alarm_data: Dict[str, Any]):
         # メール内容を生成（件名と本文）
         search_method = "datapoint_period" if datapoint_timestamp else "fallback"
         subject, body = generate_email_content(
-            alarm_name, alarm_description, timestamp, reason, error_logs, 
-            log_group_name, display_name, search_method
+            alarm_name, alarm_description, timestamp, reason, error_logs,
+            log_group_name, search_method
         )
         
         # デバッグ: メール内容を出力
@@ -181,7 +203,7 @@ def get_log_group_info_from_alarm(alarm_name: str) -> Dict[str, str]:
         
         # 5. 表示名と説明を生成
         display_name = generate_display_name(log_group_name)
-        description = generate_description(log_group_name, display_name)
+        description = generate_description(log_group_name)
         
         return {
             "log_group_name": log_group_name,
@@ -196,33 +218,39 @@ def get_log_group_info_from_alarm(alarm_name: str) -> Dict[str, str]:
 
 def infer_log_group_name_from_alarm_name(alarm_name: str) -> str:
     """
-    アラーム名からロググループ名を直接推定
-    新しい命名ルール: アラーム名の最後の部分（-Error、-Warning等）をカットしてロググループ名とする
-    
+    アラーム名からロググループ名を直接推定（CDK命名規則対応）
+    - 末尾の複合サフィックス（-Error-Alarm, -Warning-Alarm, -Critical-Alarm, -Alarm など）を除去
+    - DisplayName末尾の種別をロググループ末尾の表記に変換
+      * -Messages → -Log-messages
+      * -App      → -Log-app
+    - ロググループ名は "LS-AWSLAB-" プレフィックスを付与
     例:
-    - "LS-AWSLAB-EC2-MTA01-Messages-Error" → "LS-AWSLAB-EC2-MTA01-Messages"
-    - "LS-AWSLAB-EC2-MTA01-App-Warning" → "LS-AWSLAB-EC2-MTA01-App"
-    - "LS-AWSLAB-API-Gateway-App-Critical" → "LS-AWSLAB-API-Gateway-App"
+      AlarmName: "LS-AWSLAB-EC2-MTA01-Messages-Error-Alarm"
+      → Base: "LS-AWSLAB-EC2-MTA01-Messages"
+      → LogGroup: "LS-AWSLAB-EC2-MTA01-Log-messages"
     """
-    # アラーム名を"-"で分割
-    parts = alarm_name.split("-")
-    
-    if len(parts) > 1:
-        # 最後の部分がアラートレベル（Error、Warning、Critical等）と思われる場合は削除
-        last_part = parts[-1].lower()
-        alert_levels = ["error", "warning", "critical", "info", "debug", "alarm", "alert"]
-        
-        if last_part in alert_levels:
-            log_group_name = "-".join(parts[:-1])
-        else:
-            # 最後の部分がアラートレベルでない場合はそのまま使用
-            log_group_name = alarm_name
-    else:
-        # "-"が含まれていない場合はそのまま使用
-        log_group_name = alarm_name
-    
-    print(f"Inferred log group name from alarm '{alarm_name}': {log_group_name}")
-    return log_group_name
+    base = alarm_name
+    # 末尾に -Alarm があれば除去
+    if base.endswith("-Alarm"):
+        base = base[: -len("-Alarm")]
+    # 末尾に -Error, -Warning, -Critical, -Info, -Debug, -Alert があれば除去
+    for suf in ("-Error", "-Warning", "-Critical", "-Info", "-Debug", "-Alert"):
+        if base.endswith(suf):
+            base = base[: -len(suf)]
+            break
+
+    # 先頭に LS-AWSLAB- が無ければ付与
+    if not base.startswith("LS-AWSLAB-"):
+        base = f"LS-AWSLAB-{base}"
+
+    # DisplayNameの末尾をロググループ表記に変換
+    if base.endswith("-Messages"):
+        base = base.replace("-Messages", "-Log-messages")
+    elif base.endswith("-App"):
+        base = base.replace("-App", "-Log-app")
+
+    print(f"Inferred log group name from alarm '{alarm_name}': {base}")
+    return base
 
 def infer_log_group_name_from_metric(metric_name: str, namespace: str) -> str:
     """
@@ -327,7 +355,24 @@ def infer_filter_pattern_from_log_group_name(log_group_name: str) -> str:
     else:
         return "ERROR"  # デフォルト
 
-def generate_display_name(log_group_name: str) -> str:
+# def generate_display_name(log_group_name: str) -> str:
+#     """
+#     ロググループ名から表示名を生成
+#     新しい命名ルール: ロググループ名から"LS-AWSLAB-"プレフィックスを削除
+#     """
+#     # "LS-AWSLAB-EC2-MTA01-Messages" → "EC2-MTA01-Messages"
+#     if log_group_name.startswith("LS-AWSLAB-"):
+#         display_name = log_group_name.replace("LS-AWSLAB-", "")
+#     else:
+#         display_name = log_group_name
+#     
+#     # 後方互換性: 古い命名規則にも対応
+#     if display_name.endswith("-Log-messages"):
+#         display_name = display_name.replace("-Log-messages", "-Messages")
+#     elif display_name.endswith("-Log-app"):
+#         display_name = display_name.replace("-Log-app", "-App")
+#     
+#     return display_name
     """
     ロググループ名から表示名を生成
     新しい命名ルール: ロググループ名から"LS-AWSLAB-"プレフィックスを削除
@@ -346,7 +391,7 @@ def generate_display_name(log_group_name: str) -> str:
     
     return display_name
 
-def generate_description(log_group_name: str, display_name: str) -> str:
+def generate_description(log_group_name: str) -> str:
     """
     ロググループの説明を生成
     新しい命名ルール対応
@@ -366,21 +411,15 @@ def generate_description(log_group_name: str, display_name: str) -> str:
     else:
         log_type = "アプリケーション"
     
-    # インスタンス/サービス名を抽出
-    if "EC2-MTA01" in display_name:
-        instance_name = "EC2インスタンス(MTA01)"
-    elif "API-Gateway" in display_name:
-        instance_name = "API Gateway"
-    elif "Lambda" in display_name:
-        instance_name = "Lambda関数"
+    # インスタンス/サービス名を抽出（ロググループ名から推定）
+    base = log_group_name.replace("LS-AWSLAB-", "")
+    # 例: EC2-MTA01-Log-app / EC2-MTA01-Log-messages → EC2-MTA01
+    parts = base.split("-")
+    if len(parts) >= 2:
+        instance_name = f"{parts[0]}-{parts[1]}"
     else:
-        # 汎用的な抽出: 最初の部分を使用
-        parts = display_name.split("-")
-        if len(parts) >= 2:
-            instance_name = f"{parts[0]}-{parts[1]}"
-        else:
-            instance_name = parts[0] if parts else display_name
-    
+        instance_name = base
+
     return f"{instance_name}の{log_type}ログ"
 
 def extract_datapoint_timestamp_from_reason(state_reason: str) -> Optional[str]:
@@ -526,75 +565,71 @@ def get_recent_error_logs(log_group_name: str, filter_pattern: str, hours_back: 
 def generate_email_content(alarm_name: str, alarm_description: str, 
                          timestamp: str, reason: str, 
                          error_logs: List[Dict[str, Any]], 
-                         log_group_name: str, display_name: str,
+                         log_group_name: str,
                          search_method: str = "unknown") -> tuple:
-    """メールの件名と本文を生成"""
-    
-    # 件名
-    subject = f"🚨 AWS Alert: {display_name} - エラーが検出されました"
-    
-    # ログタイプに応じた説明を生成
-    log_type_descriptions = {
-        "EC2-MTA01-Messages": "EC2インスタンス(awslab-mta01)のシステムログ",
-        "EC2-MTA01-App": "EC2インスタンス(awslab-mta01)のアプリケーションログ", 
-        "APIGW-mtkhs-App01": "API Gateway(mtkhs-App01)",
-        "Lambda-mtkhs-App01": "Lambda関数(mtkhs-App01)"
-    }
-    
-    log_description = log_type_descriptions.get(display_name, f"{display_name}のログ")
-    
-    # 本文
-    body = f"""
-AWS CloudWatchアラームが発生しました。
+    """メールの件名と本文を生成（デフォルトSNSメールに準拠＋日本語の追加情報）"""
 
-【アラーム情報】
-・アラーム名: {alarm_name}
-・対象ログ: {log_description}
-・ロググループ: {log_group_name}
-・説明: {alarm_description}
-・発生時刻: {timestamp}
-・理由: {reason}
+    # リージョン表記
+    region_code = os.environ.get('AWS_REGION', 'ap-northeast-1')
+    region_long = {
+        'ap-northeast-1': 'Asia Pacific (Tokyo)'
+    }.get(region_code, region_code)
 
-【検出されたエラーログ】
-"""
-    
+    # アカウントID（デフォルトメールの表記に近づけるため）
+    try:
+        sts = boto3.client('sts')
+        account_id = sts.get_caller_identity().get('Account', 'unknown')
+    except Exception:
+        account_id = 'unknown'
+
+    # 件名（SNSデフォルトに準拠）
+    subject = f'ALARM: "{alarm_name}" in {region_long}'
+
+    # デフォルトSNSメール風の本文（英語ベース）
+    header = (
+        f"You are receiving this email because your Amazon CloudWatch Alarm \"{alarm_name}\" "
+        f"in the {region_long} region has entered the ALARM state, because \"{reason}\" "
+        f"at \"{timestamp}\".\n\n"
+    )
+
+    details = (
+        "Alarm Details:\n"
+        f"- Name: {alarm_name}\n"
+        f"- Description: {alarm_description}\n"
+        f"- Timestamp: {timestamp}\n"
+        f"- AWS Account: {account_id}\n"
+        f"- Region: {region_code}\n"
+    )
+
+    # 追加セクション（日本語）
+    body_extra = "\n【検出されたエラーログ（追加情報）】\n"
     if error_logs:
-        # 検索方法に応じた説明を生成
         if search_method == "datapoint_period":
-            body += f"アラーム発生の原因となったメトリクス期間（5分間）で {len(error_logs)} 件のエラーが検出されました:\n\n"
+            body_extra += f"アラーム発生のメトリクス期間（5分間）で {len(error_logs)} 件のエラーが検出されました:\n\n"
         else:
-            body += f"過去1時間で {len(error_logs)} 件のエラーが検出されました:\n\n"
-        
-        for i, log_event in enumerate(error_logs[:5], 1):  # 最大5件表示
+            body_extra += f"過去1時間で {len(error_logs)} 件のエラーが検出されました:\n\n"
+        for i, log_event in enumerate(error_logs[:5], 1):
             log_time = datetime.fromtimestamp(log_event['timestamp'] / 1000)
             message = log_event['message']
-            
-            # エラーメッセージを整形（長すぎる場合は切り詰め）
             if len(message) > 300:
                 message = message[:300] + "..."
-            
-            body += f"{i}. {log_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-            body += f"   {message}\n\n"
-            
+            body_extra += f"{i}. {log_time.strftime('%Y-%m-%d %H:%M:%S')}\n   {message}\n\n"
         if len(error_logs) > 5:
-            body += f"... 他 {len(error_logs) - 5} 件のエラーログがあります\n\n"
+            body_extra += f"... 他 {len(error_logs) - 5} 件のエラーログがあります\n\n"
     else:
-        body += "詳細なエラーログの取得に失敗しました。\n\n"
-    
-    # 対応方法ブロックを削除（不要なため）
-    action_guide = ""
-    
-    # URLエンコードされたロググループ名を生成
+        body_extra += "詳細なエラーログの取得に失敗しました。\n\n"
+
+    # CloudWatch Logsリンク（英語の見出し維持）
     import urllib.parse
     encoded_log_group = urllib.parse.quote(log_group_name, safe='')
-    
-    body += f"""
-【ログ確認URL】
-https://ap-northeast-1.console.aws.amazon.com/cloudwatch/home?region=ap-northeast-1#logsV2:log-groups/log-group/{encoded_log_group}
+    logs_link = (
+        "CloudWatch Logs:\n"
+        f"- Log group: {log_group_name}\n"
+        f"- Open in console:\n  https://console.aws.amazon.com/cloudwatch/home?region={region_code}#logsV2:log-groups/log-group/{encoded_log_group}\n\n"
+        "This message was sent automatically.\n"
+    )
 
-このメールは自動送信されています。
-"""
-    
+    body = header + details + "\n" + body_extra + "\n" + logs_link
     return subject, body
 
 def send_notification(sns_topic_arn: str, subject: str, body: str):

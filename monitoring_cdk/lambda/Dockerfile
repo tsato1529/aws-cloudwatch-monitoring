@@ -8,5 +8,5 @@ RUN pip3 install -r requirements.txt
 COPY notify.py .
 
 # ハンドラー関数の場所を指定
-CMD ["notify.handler"]
+CMD ["notify.lambda_handler"]
 
