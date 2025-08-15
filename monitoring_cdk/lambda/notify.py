@@ -73,6 +73,8 @@ def process_alarm_event(alarm_data: Dict[str, Any]):
         raise ValueError("EMAIL_SNS_TOPIC_ARN environment variable not set")
     
     # SNS経由のCloudWatchアラームイベントの構造に対応
+    old_state = 'UNKNOWN'
+    alarm_arn = 'unknown'
     if 'AlarmName' in alarm_data:
         # SNS経由のCloudWatchアラーム形式（標準形式）
         alarm_name = alarm_data.get('AlarmName', 'Unknown')
@@ -80,6 +82,8 @@ def process_alarm_event(alarm_data: Dict[str, Any]):
         new_state = alarm_data.get('NewStateValue', 'UNKNOWN')
         reason = alarm_data.get('NewStateReason', '')
         timestamp = alarm_data.get('StateChangeTime', datetime.now().isoformat())
+        old_state = alarm_data.get('OldStateValue', old_state)
+        alarm_arn = alarm_data.get('AlarmArn', alarm_arn)
     elif 'alarmData' in alarm_data:
         # 直接呼び出し形式（後方互換性のため保持）
         alarm_info = alarm_data['alarmData']
@@ -151,7 +155,8 @@ def process_alarm_event(alarm_data: Dict[str, Any]):
         search_method = "datapoint_period" if datapoint_timestamp else "fallback"
         subject, body = generate_email_content(
             alarm_name, alarm_description, timestamp, reason, error_logs,
-            log_group_name, search_method
+            log_group_name, search_method,
+            old_state=old_state, new_state=new_state, alarm_arn=alarm_arn
         )
         
         # デバッグ: メール内容を出力
@@ -555,7 +560,10 @@ def generate_email_content(alarm_name: str, alarm_description: str,
                          timestamp: str, reason: str, 
                          error_logs: List[Dict[str, Any]], 
                          log_group_name: str,
-                         search_method: str = "unknown") -> tuple:
+                         search_method: str = "unknown",
+                         old_state: Optional[str] = None,
+                         new_state: Optional[str] = None,
+                         alarm_arn: Optional[str] = None) -> tuple:
     """メールの件名と本文を生成（デフォルトSNSメールに準拠＋日本語の追加情報）"""
 
     # リージョン表記
@@ -586,6 +594,9 @@ def generate_email_content(alarm_name: str, alarm_description: str,
         f"- Name: {alarm_name}\n"
         f"- Description: {alarm_description}\n"
         f"- Timestamp: {timestamp}\n"
+        f"- State Change: {old_state or 'UNKNOWN'} -> {new_state or 'UNKNOWN'}\n"
+        f"- Reason for State Change: {reason}\n"
+        f"- Alarm Arn: {alarm_arn or 'unknown'}\n"
         f"- AWS Account: {account_id}\n"
         f"- Region: {region_code}\n"
     )
