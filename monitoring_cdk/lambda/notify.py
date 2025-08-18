@@ -106,12 +106,9 @@ def process_alarm_event(alarm_data: Dict[str, Any]):
             
             log_group_name = log_group_info['log_group_name']
             filter_pattern = log_group_info['filter_pattern']
-            display_name = log_group_info['display_name']
-            description = log_group_info['description']
             
             print(f"Dynamic config - Log Group: {log_group_name}")
             print(f"Dynamic config - Filter Pattern: {filter_pattern}")
-            print(f"Dynamic config - Display Name: {display_name}")
             
         except Exception as e:
             print(f"Error getting dynamic log group configuration: {e}")
@@ -125,12 +122,9 @@ def process_alarm_event(alarm_data: Dict[str, Any]):
                     break
             log_group_name = base
             filter_pattern = infer_filter_pattern_from_log_group_name(log_group_name)
-            display_name = generate_display_name(log_group_name)
-            description = generate_description(log_group_name)
             print('[Fallback] Using inferred config from alarm name')
             print(f"[Fallback] Log Group: {log_group_name}")
             print(f"[Fallback] Filter Pattern: {filter_pattern}")
-            print(f"[Fallback] Display Name: {display_name}")
         
         print(f"Identified log group: {log_group_name}, filter: {filter_pattern}")
         
@@ -196,15 +190,10 @@ def get_log_group_info_from_alarm(alarm_name: str) -> Dict[str, str]:
         # 4. メトリクスフィルターからフィルターパターンを取得
         filter_pattern = get_filter_pattern_from_log_group(logs_client, log_group_name, metric_name)
         
-        # 5. 表示名と説明を生成
-        display_name = generate_display_name(log_group_name)
-        description = generate_description(log_group_name)
-        
+        # 5. 表示名や説明の生成は不要（メール本文では使用しないため）
         return {
             "log_group_name": log_group_name,
-            "display_name": display_name,
-            "filter_pattern": filter_pattern,
-            "description": description
+            "filter_pattern": filter_pattern
         }
         
     except Exception as e:
@@ -345,47 +334,27 @@ def infer_filter_pattern_from_log_group_name(log_group_name: str) -> str:
     return display_name
 
 def generate_display_name(log_group_name: str) -> str:
-    """ロググループ名から表示名を生成（後方互換に配慮）"""
+    """ロググループ名から表示名を生成（環境非依存）"""
     base = log_group_name
-    if base.startswith("LS-AWSLAB-"):
-        base = base.replace("LS-AWSLAB-", "", 1)
+    # 一般的な表記ゆれのみ整形（接頭辞は残す）
     if base.endswith("-Log-messages"):
-        base = base.replace("-Log-messages", "-Messages")
+        base = base[:-len("-Log-messages")] + "-Messages"
     elif base.endswith("-Log-app"):
-        base = base.replace("-Log-app", "-App")
+        base = base[:-len("-Log-app")] + "-App"
     return base
 
 
 def generate_description(log_group_name: str) -> str:
-    """
-    ロググループの説明を生成
-    新しい命名ルール対応
-    """
+    """ロググループの説明を生成（環境非依存）"""
     log_group_lower = log_group_name.lower()
-    
-    # 新しい命名ルール: ロググループ名の末尾で判定
-    if log_group_lower.endswith("-messages"):
+    if log_group_lower.endswith("-messages") or "log-messages" in log_group_lower:
         log_type = "システムメッセージ"
-    elif log_group_lower.endswith("-app"):
-        log_type = "アプリケーション"
-    # 後方互換性: 古い命名規則
-    elif "log-messages" in log_group_lower:
-        log_type = "システムメッセージ"
-    elif "log-app" in log_group_lower:
+    elif log_group_lower.endswith("-app") or "log-app" in log_group_lower:
         log_type = "アプリケーション"
     else:
         log_type = "アプリケーション"
-    
-    # インスタンス/サービス名を抽出（ロググループ名から推定）
-    base = log_group_name.replace("LS-AWSLAB-", "")
-    # 例: EC2-MTA01-Log-app / EC2-MTA01-Log-messages → EC2-MTA01
-    parts = base.split("-")
-    if len(parts) >= 2:
-        instance_name = f"{parts[0]}-{parts[1]}"
-    else:
-        instance_name = base
-
-    return f"{instance_name}の{log_type}ログ"
+    # 特定の接頭辞・命名規則に依存せず、そのままのロググループ名を使用
+    return f"{log_group_name}の{log_type}ログ"
 
 def extract_datapoint_timestamp_from_reason(state_reason: str) -> Optional[str]:
     """
