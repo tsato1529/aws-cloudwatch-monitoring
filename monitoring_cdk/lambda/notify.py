@@ -186,12 +186,9 @@ def get_log_group_info_from_alarm(alarm_name: str) -> Dict[str, str]:
         
         print(f"Alarm metric: {namespace}/{metric_name}")
         
-        # 2. アラーム名から直接ロググループ名を推定（新しい命名ルール）
+        # 2. アラーム名から直接ロググループ名を推定（汎用ルール）
+        #    規約: <LogGroupName>-<Severity>-Alarm から末尾の "-<Severity>-Alarm" を取り除いたもの
         log_group_name = infer_log_group_name_from_alarm_name(alarm_name)
-        
-        # フォールバック: メトリクス情報からも推定を試行
-        if not log_group_name:
-            log_group_name = infer_log_group_name_from_metric(metric_name, namespace)
         
         # 3. ロググループの存在確認
         verify_log_group_exists(logs_client, log_group_name)
@@ -234,27 +231,7 @@ def infer_log_group_name_from_alarm_name(alarm_name: str) -> str:
     print(f"Inferred log group name from alarm '{alarm_name}': {base}")
     return base
 
-def infer_log_group_name_from_metric(metric_name: str, namespace: str) -> str:
-    """
-    メトリクス名と名前空間からロググループ名を推定（後方互換性のため保持）
-    """
-    if namespace == "LS-AWSLAB-ErrorMonitoring":
-        # 新しい命名規則: "EC2-MTA01-Messages-Error" → "LS-AWSLAB-EC2-MTA01-Messages"
-        log_group_suffix = metric_name.replace("-Error", "")
-        log_group_name = f"LS-AWSLAB-{log_group_suffix}"
-            
-    elif namespace == "LS-AWSLAB-EC2-MTA01":
-        # 既存の命名規則（後方互換性）
-        if "messages" in metric_name.lower():
-            log_group_name = "LS-AWSLAB-EC2-MTA01-Log-messages"
-        elif "app" in metric_name.lower():
-            log_group_name = "LS-AWSLAB-EC2-MTA01-Log-app"
-        else:
-            log_group_name = "LS-AWSLAB-EC2-MTA01-Log-messages"  # デフォルト
-    else:
-        raise ValueError(f"Unknown namespace: {namespace}")
-    
-    return log_group_name
+# 互換目的のメトリクス→ロググループ推定は廃止（環境非依存化のため）。必要なら別途実装。
 
 def verify_log_group_exists(logs_client, log_group_name: str):
     """
@@ -320,22 +297,16 @@ def get_filter_pattern_from_log_group(logs_client, log_group_name: str, metric_n
 def infer_filter_pattern_from_log_group_name(log_group_name: str) -> str:
     """
     ロググループ名からフィルターパターンを推定（フォールバック用）
-    新しい命名ルール対応
+    - 末尾が "-messages" → "[error]"
+    - 末尾が "-app" → "ERROR"
+    それ以外は "ERROR" にフォールバック
     """
     log_group_lower = log_group_name.lower()
-    
-    # 新しい命名ルール: ロググループ名の末尾で判定
-    if log_group_lower.endswith("-messages"):
+    if log_group_lower.endswith("-messages") or "log-messages" in log_group_lower:
         return "[error]"
-    elif log_group_lower.endswith("-app"):
+    if log_group_lower.endswith("-app") or "log-app" in log_group_lower:
         return "ERROR"
-    # 後方互換性: 古い命名規則
-    elif "log-messages" in log_group_lower:
-        return "[error]"
-    elif "log-app" in log_group_lower:
-        return "ERROR"
-    else:
-        return "ERROR"  # デフォルト
+    return "ERROR"
 
 # def generate_display_name(log_group_name: str) -> str:
 #     """
