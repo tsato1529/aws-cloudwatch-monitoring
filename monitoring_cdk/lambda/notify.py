@@ -596,8 +596,8 @@ def generate_email_content(alarm_name: str, alarm_description: str,
         f"- Timestamp: {timestamp}\n"
         f"- State Change: {old_state or 'UNKNOWN'} -> {new_state or 'UNKNOWN'}\n"
         f"- Reason for State Change: {reason}\n"
-        f"- Alarm Arn: {alarm_arn or 'unknown'}\n"
         f"- AWS Account: {account_id}\n"
+        f"- Alarm Arn: {alarm_arn or 'unknown'}\n"
         f"- Region: {region_code}\n"
     )
 
@@ -624,7 +624,7 @@ def generate_email_content(alarm_name: str, alarm_description: str,
     encoded_alarm_name = urllib.parse.quote(alarm_name, safe='')
     alarm_console_link = (
         "View this alarm in the AWS Management Console:\n"
-        f"- https://console.aws.amazon.com/cloudwatch/home?region={region_code}#alarmsV2:alarm/{encoded_alarm_name}\n\n"
+        f"https://console.aws.amazon.com/cloudwatch/home?region={region_code}#alarmsV2:alarm/{encoded_alarm_name}\n\n"
     )
 
     # Threshold + Monitored Metric + State Change Actions blocks (Alarm Details の後に表示)
@@ -696,7 +696,7 @@ def generate_email_content(alarm_name: str, alarm_description: str,
         "本アラートメールが届かなくなります。運用に支障が出るため、承認を得た場合のみ実施してください。\n\n"
     )
 
-    body = header + alarm_console_link + details + "\n" + threshold_block + monitored_metric_block + state_change_actions_block + body_extra + caution_block
+    body = header + body_extra + alarm_console_link + details + "\n" + threshold_block + monitored_metric_block + state_change_actions_block + caution_block
     return subject, body
 
 def send_notification(sns_topic_arn: str, subject: str, body: str):
