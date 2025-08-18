@@ -619,17 +619,84 @@ def generate_email_content(alarm_name: str, alarm_description: str,
     else:
         body_extra += "詳細なエラーログの取得に失敗しました。\n\n"
 
-    # CloudWatch Logsリンク（英語の見出し維持）
+    # CloudWatch Alarm コンソールリンク（Alarm Details の前に表示）
     import urllib.parse
-    encoded_log_group = urllib.parse.quote(log_group_name, safe='')
-    logs_link = (
-        "CloudWatch Logs:\n"
-        f"- Log group: {log_group_name}\n"
-        f"- Open in console:\n  https://console.aws.amazon.com/cloudwatch/home?region={region_code}#logsV2:log-groups/log-group/{encoded_log_group}\n\n"
-        "This message was sent automatically.\n"
+    encoded_alarm_name = urllib.parse.quote(alarm_name, safe='')
+    alarm_console_link = (
+        "View this alarm in the AWS Management Console:\n"
+        f"- https://console.aws.amazon.com/cloudwatch/home?region={region_code}#alarmsV2:alarm/{encoded_alarm_name}\n\n"
     )
 
-    body = header + details + "\n" + body_extra + "\n" + logs_link
+    # Threshold + Monitored Metric + State Change Actions blocks (Alarm Details の後に表示)
+    monitored_metric_block = "Monitored Metric:\n- (not available)\n\n"
+    state_change_actions_block = (
+        "State Change Actions:\n"
+        "- OK: None\n"
+        "- ALARM: None\n"
+        "- INSUFFICIENT_DATA: None\n\n"
+    )
+    try:
+        cw = boto3.client('cloudwatch')
+        resp = cw.describe_alarms(AlarmNames=[alarm_name])
+        if resp.get('MetricAlarms'):
+            al = resp['MetricAlarms'][0]
+            comp = al.get('ComparisonOperator')
+            thr = al.get('Threshold')
+            evalp = al.get('EvaluationPeriods')
+            d2a = al.get('DatapointsToAlarm')
+            period = al.get('Period')
+            n_dp = d2a if d2a is not None else evalp
+            if comp and thr is not None and n_dp is not None and period is not None:
+                sentence = f"- The alarm is in the ALARM state when the metric is {comp} {thr} for {n_dp} datapoints within {period} seconds.\n\n"
+            else:
+                sentence = "- The alarm is in the ALARM state when the metric crosses the configured threshold.\n\n"
+            threshold_block = "Threshold:\n" + sentence
+
+            # Monitored Metric
+            ns = al.get('Namespace')
+            mn = al.get('MetricName')
+            stat = al.get('Statistic') or al.get('ExtendedStatistic')
+            unit = al.get('Unit')
+            tmd = al.get('TreatMissingData')
+            dims = al.get('Dimensions', [])
+            dim_str = ", ".join([f"{d.get('Name')}={d.get('Value')}" for d in dims]) if dims else "None"
+            mm_lines = [
+                "Monitored Metric:",
+                f"- MetricNamespace: {ns if ns is not None else 'None'}",
+                f"- MetricName: {mn if mn is not None else 'None'}",
+                f"- Dimensions: {dim_str}",
+                f"- Period: {period} seconds" if period is not None else "- Period: None",
+                f"- Statistic: {stat}" if stat else "- Statistic: None",
+                f"- Unit: {unit if unit is not None else 'None'}",
+                f"- TreatMissingData: {tmd if tmd is not None else 'None'}",
+            ]
+            monitored_metric_block = "\n".join(mm_lines) + "\n\n"
+
+            # State Change Actions
+            def _fmt_actions(actions):
+                if actions:
+                    return ", ".join(actions)
+                return "None"
+            sca_lines = [
+                "State Change Actions:",
+                f"- OK: {_fmt_actions(al.get('OKActions'))}",
+                f"- ALARM: {_fmt_actions(al.get('AlarmActions'))}",
+                f"- INSUFFICIENT_DATA: {_fmt_actions(al.get('InsufficientDataActions'))}",
+            ]
+            state_change_actions_block = "\n".join(sca_lines) + "\n\n"
+        else:
+            threshold_block = "Threshold:\n- The alarm is in the ALARM state when the metric crosses the configured threshold.\n\n"
+    except Exception:
+        threshold_block = "Threshold:\n- The alarm is in the ALARM state when the metric crosses the configured threshold.\n\n"
+
+    # 注意喚起（SNSのunsubscribeリンク直前に表示されるよう本文末尾に追記）
+    caution_block = (
+        "【重要】購読解除に関する注意\n"
+        "本メールの末尾に表示される Amazon SNS の unsubscribe リンクをクリックすると、"
+        "本アラートメールが届かなくなります。運用に支障が出るため、承認を得た場合のみ実施してください。\n\n"
+    )
+
+    body = header + alarm_console_link + details + "\n" + threshold_block + monitored_metric_block + state_change_actions_block + body_extra + caution_block
     return subject, body
 
 def send_notification(sns_topic_arn: str, subject: str, body: str):

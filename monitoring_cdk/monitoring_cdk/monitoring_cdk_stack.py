@@ -52,10 +52,12 @@ class MonitoringCdkStack(Stack):
             subs.EmailSubscription("takaaki.sato@librasolutions.co.jp")
         )
         
-        # 汎用Lambda関数(Dockerイメージ使用)
-        notify_function = lambda_.DockerImageFunction(
+        # 汎用Lambda関数（Zipデプロイ: Docker不要）
+        notify_function = lambda_.Function(
             self, "NotifyFunction",
-            code=lambda_.DockerImageCode.from_image_asset("lambda"),
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="notify.lambda_handler",
+            code=lambda_.Code.from_asset("lambda"),
             timeout=Duration.minutes(5),
             environment={
                 "EMAIL_SNS_TOPIC_ARN": self.email_notification_topic.topic_arn
