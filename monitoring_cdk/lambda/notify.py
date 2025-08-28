@@ -38,9 +38,8 @@ def lambda_handler(event, context):
                 else:
                     print(f"Unknown event source: {record.get('EventSource')}")
         else:
-            print("Processing direct CloudWatch alarm event...")
-            # 直接のCloudWatchアラームイベント
-            process_alarm_event(event)
+            print("Unsupported event: expected SNS Records. Aborting.")
+            raise ValueError("Unsupported event source. This function must be invoked via SNS.")
             
         print("=== FUNCTION COMPLETED SUCCESSFULLY ===")
         return {
