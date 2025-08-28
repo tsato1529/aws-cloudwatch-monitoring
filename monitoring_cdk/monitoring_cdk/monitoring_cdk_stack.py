@@ -33,14 +33,12 @@ class MonitoringCdkStack(Stack):
             }
         ]
 
-        # アラーム処理用SNSトピック（Lambda関数のトリガー用）
+        # SNSトピックをこのスタックで作成（命名は固定）
         self.alarm_processing_topic = sns.Topic(
             self, "AlarmProcessingTopic",
             display_name="CloudWatch Alarm Processing",
             topic_name="LS-AWSLAB-CloudWatchAlarmProcessing"
         )
-
-        # メール通知用SNSトピック（最終的な通知先）
         self.email_notification_topic = sns.Topic(
             self, "EmailNotificationTopic",
             display_name="Error Notifications via Email",
