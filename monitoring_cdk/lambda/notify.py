@@ -100,37 +100,12 @@ def process_alarm_event(alarm_data: Dict[str, Any]):
     
     # アラーム状態がALARMの場合のみ処理
     if new_state == 'ALARM':
-        try:
-            # 1) SNSメッセージ内のTriggerから直接解決
-            log_group_info = get_log_group_info_from_trigger(alarm_data)
-            log_group_name = log_group_info['log_group_name']
-            filter_pattern = normalize_filter_pattern(log_group_info.get('filter_pattern', ''))
-            print(f"Resolved from Trigger - Log Group: {log_group_name}")
-            print(f"Resolved from Trigger - Filter Pattern: {filter_pattern}")
-        except Exception as e1:
-            print(f"Could not resolve from Trigger: {e1}")
-            try:
-                # 2) アラーム名からCloudWatch APIを用いて解決（従来手法）
-                log_group_info = get_log_group_info_from_alarm(alarm_name)
-                log_group_name = log_group_info['log_group_name']
-                filter_pattern = normalize_filter_pattern(log_group_info.get('filter_pattern', ''))
-                print(f"Resolved from Alarm API - Log Group: {log_group_name}")
-                print(f"Resolved from Alarm API - Filter Pattern: {filter_pattern}")
-            except Exception as e2:
-                print(f"Could not resolve from Alarm API: {e2}")
-                # 3) フォールバック: アラーム名から推定
-                base = alarm_name
-                if base.endswith('-Alarm'):
-                    base = base[:-len('-Alarm')]
-                for suf in ('-Error', '-Warning', '-Critical', '-Info', '-Debug', '-Alert'):
-                    if base.lower().endswith(suf.lower()):
-                        base = base[:-len(suf)]
-                        break
-                log_group_name = base
-                filter_pattern = normalize_filter_pattern(infer_filter_pattern_from_log_group_name(log_group_name))
-                print('[Fallback] Using inferred config from alarm name')
-                print(f"[Fallback] Log Group: {log_group_name}")
-                print(f"[Fallback] Filter Pattern: {filter_pattern}")
+        # Triggerからのみ解決（従来手法・フォールバックは無効化）
+        log_group_info = get_log_group_info_from_trigger(alarm_data)
+        log_group_name = log_group_info['log_group_name']
+        filter_pattern = normalize_filter_pattern(log_group_info.get('filter_pattern', ''))
+        print(f"Resolved from Trigger - Log Group: {log_group_name}")
+        print(f"Resolved from Trigger - Filter Pattern: {filter_pattern}")
         
         print(f"Identified log group: {log_group_name}, filter: {filter_pattern}")
         
