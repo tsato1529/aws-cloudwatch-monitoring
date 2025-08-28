@@ -101,30 +101,36 @@ def process_alarm_event(alarm_data: Dict[str, Any]):
     # アラーム状態がALARMの場合のみ処理
     if new_state == 'ALARM':
         try:
-            # アラーム情報から動的にロググループ情報を取得
-            log_group_info = get_log_group_info_from_alarm(alarm_name)
-            
+            # 1) SNSメッセージ内のTriggerから直接解決
+            log_group_info = get_log_group_info_from_trigger(alarm_data)
             log_group_name = log_group_info['log_group_name']
-            filter_pattern = log_group_info['filter_pattern']
-            
-            print(f"Dynamic config - Log Group: {log_group_name}")
-            print(f"Dynamic config - Filter Pattern: {filter_pattern}")
-            
-        except Exception as e:
-            print(f"Error getting dynamic log group configuration: {e}")
-            # フォールバック: アラーム名から推定して処理を継続（最小ルール）
-            base = alarm_name
-            if base.endswith('-Alarm'):
-                base = base[:-len('-Alarm')]
-            for suf in ('-Error', '-Warning', '-Critical', '-Info', '-Debug', '-Alert'):
-                if base.lower().endswith(suf.lower()):
-                    base = base[:-len(suf)]
-                    break
-            log_group_name = base
-            filter_pattern = infer_filter_pattern_from_log_group_name(log_group_name)
-            print('[Fallback] Using inferred config from alarm name')
-            print(f"[Fallback] Log Group: {log_group_name}")
-            print(f"[Fallback] Filter Pattern: {filter_pattern}")
+            filter_pattern = normalize_filter_pattern(log_group_info.get('filter_pattern', ''))
+            print(f"Resolved from Trigger - Log Group: {log_group_name}")
+            print(f"Resolved from Trigger - Filter Pattern: {filter_pattern}")
+        except Exception as e1:
+            print(f"Could not resolve from Trigger: {e1}")
+            try:
+                # 2) アラーム名からCloudWatch APIを用いて解決（従来手法）
+                log_group_info = get_log_group_info_from_alarm(alarm_name)
+                log_group_name = log_group_info['log_group_name']
+                filter_pattern = normalize_filter_pattern(log_group_info.get('filter_pattern', ''))
+                print(f"Resolved from Alarm API - Log Group: {log_group_name}")
+                print(f"Resolved from Alarm API - Filter Pattern: {filter_pattern}")
+            except Exception as e2:
+                print(f"Could not resolve from Alarm API: {e2}")
+                # 3) フォールバック: アラーム名から推定
+                base = alarm_name
+                if base.endswith('-Alarm'):
+                    base = base[:-len('-Alarm')]
+                for suf in ('-Error', '-Warning', '-Critical', '-Info', '-Debug', '-Alert'):
+                    if base.lower().endswith(suf.lower()):
+                        base = base[:-len(suf)]
+                        break
+                log_group_name = base
+                filter_pattern = normalize_filter_pattern(infer_filter_pattern_from_log_group_name(log_group_name))
+                print('[Fallback] Using inferred config from alarm name')
+                print(f"[Fallback] Log Group: {log_group_name}")
+                print(f"[Fallback] Filter Pattern: {filter_pattern}")
         
         print(f"Identified log group: {log_group_name}, filter: {filter_pattern}")
         
@@ -160,7 +166,104 @@ def process_alarm_event(alarm_data: Dict[str, Any]):
         # SNS経由でメール送信
         send_notification(email_sns_topic_arn, subject, body)
 
+def normalize_filter_pattern(pattern: Optional[str]) -> str:
+    """CloudWatch Logsのfilter_log_eventsで使える形に正規化する"""
+    if pattern is None:
+        return ""
+    p = str(pattern).strip()
+    # 外側のクォートを除去
+    if (p.startswith('"') and p.endswith('"')) or (p.startswith("'") and p.endswith("'")):
+        p = p[1:-1].strip()
+    # 既存のメトリクスフィルタ由来の特殊パターンに対応
+    if p.lower() == "[error]":
+        return "error"
+    return p
+
+
+def get_log_group_info_from_trigger(alarm_message: Dict[str, Any]) -> Dict[str, str]:
+    """
+    SNSメッセージ内のTrigger情報から、CloudWatch Logsのメトリクスフィルタを逆引きして
+    logGroupName と filterPattern を取得する。
+    - 単純メトリック: Trigger.MetricName / Trigger.Namespace
+    - メトリック数式: Trigger.Metrics[].MetricStat.Metric.Namespace/MetricName を走査
+    """
+    trigger = alarm_message.get('Trigger')
+    if not trigger:
+        raise ValueError("Trigger not found in alarm message")
+
+    candidates: List[tuple] = []
+
+    # 単純メトリック
+    if isinstance(trigger, dict) and 'MetricName' in trigger and 'Namespace' in trigger:
+        candidates.append((trigger.get('Namespace'), trigger.get('MetricName')))
+
+    # メトリック数式
+    metrics = trigger.get('Metrics') if isinstance(trigger, dict) else None
+    if isinstance(metrics, list):
+        for m in metrics:
+            metric_stat = m.get('MetricStat') if isinstance(m, dict) else None
+            if not metric_stat:
+                continue
+            metric = metric_stat.get('Metric')
+            if not isinstance(metric, dict):
+                continue
+            ns = metric.get('Namespace')
+            mn = metric.get('MetricName')
+            if ns and mn:
+                candidates.append((ns, mn))
+
+    if not candidates:
+        raise ValueError("No metric candidates found in Trigger")
+
+    logs_client = boto3.client('logs')
+    found_filters: List[Dict[str, Any]] = []
+    for ns, mn in candidates:
+        try:
+            resp = logs_client.describe_metric_filters(
+                metricName=mn,
+                metricNamespace=ns
+            )
+            found_filters.extend(resp.get('metricFilters', []))
+        except Exception as e:
+            print(f"describe_metric_filters error for {ns}/{mn}: {e}")
+            continue
+
+    if not found_filters:
+        raise ValueError("No metric filters matched by Trigger's metrics")
+
+    # 候補が複数なら、アラーム名から推測したロググループ名に近いものを優先
+    if len(found_filters) > 1:
+        alarm_name = alarm_message.get('AlarmName')
+        if alarm_name:
+            base = infer_log_group_name_from_alarm_name(alarm_name)
+            # よくある表記ゆれの候補を生成
+            candidates_lg = {base}
+            if base.endswith('-Messages'):
+                candidates_lg.add(base[:-len('-Messages')] + '-Log-messages')
+                candidates_lg.add(base[:-len('-Messages')] + '-messages')
+                candidates_lg.add(base[:-len('-Messages')] + '-Log-Messages')
+            if base.endswith('-App'):
+                candidates_lg.add(base[:-len('-App')] + '-Log-app')
+                candidates_lg.add(base[:-len('-App')] + '-app')
+                candidates_lg.add(base[:-len('-App')] + '-Log-App')
+            for f in found_filters:
+                lg = f.get('logGroupName')
+                if lg in candidates_lg:
+                    return {
+                        'log_group_name': lg,
+                        'filter_pattern': f.get('filterPattern', '')
+                    }
+
+    # 最初のものを使用（一般的にメトリクス名/名前空間は一意なはず）
+    chosen = found_filters[0]
+    return {
+        'log_group_name': chosen.get('logGroupName'),
+        'filter_pattern': chosen.get('filterPattern', '')
+    }
+
+
 def get_log_group_info_from_alarm(alarm_name: str) -> Dict[str, str]:
+
     """
     CloudWatch APIを使用してアラームに関連するロググループとフィルターパターンを動的に取得
     """
@@ -439,10 +542,7 @@ def get_logs_from_datapoint_period(log_group_name: str, filter_pattern: str,
         print(f"Searching logs from {start_time} to {end_time} (period: {period_seconds}s)")
         
         # フィルターパターンを正規化
-        if filter_pattern == "[error]":
-            search_pattern = "error"
-        else:
-            search_pattern = filter_pattern
+        search_pattern = normalize_filter_pattern(filter_pattern)
         
         response = logs_client.filter_log_events(
             logGroupName=log_group_name,
@@ -475,12 +575,7 @@ def get_recent_error_logs(log_group_name: str, filter_pattern: str, hours_back: 
     
     try:
         # フィルターパターンを正規化（CloudWatch Logsの形式に合わせる）
-        if filter_pattern == "[error]":
-            # 既存のパターンはそのまま使用
-            search_pattern = "error"
-        else:
-            # 新しいパターンはそのまま使用
-            search_pattern = filter_pattern
+        search_pattern = normalize_filter_pattern(filter_pattern)
         
         response = logs_client.filter_log_events(
             logGroupName=log_group_name,
