@@ -6,7 +6,8 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 
 
-def normalize_filter_pattern(pattern: Optional[str]) -> str:\n    """Normalize CloudWatch Logs filter patterns for filter_log_events."""
+def normalize_filter_pattern(pattern: Optional[str]) -> str:
+    """Normalize CloudWatch Logs filter patterns for filter_log_events."""
     if pattern is None:
         return ""
     p = str(pattern).strip()
