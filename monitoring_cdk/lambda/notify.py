@@ -1,25 +1,25 @@
 """
-Lambda: CloudWatch Alarm (via SNS) -> Resolve Log Group and Filter -> Fetch Logs -> Email
+Lambda: CloudWatch アラーム（SNS経由）→ ロググループ/フィルタ特定 → ログ抽出 → メール送信
 
-This function is intentionally minimal and strictly driven by the SNS Alarm message.
-It does NOT include any fallbacks such as:
-- Inferring resources from alarm names
-- Calling DescribeAlarms to backfill details
-- Searching arbitrary recent time ranges when a datapoint time cannot be extracted
+この関数は、SNSから受信した CloudWatch アラーム通知だけを前提とした最小実装です。
+以下のフォールバックは一切行いません：
+- アラーム名からの推測
+- DescribeAlarms 等による情報の補完
+- データポイント時刻が取れない場合の「過去◯分」などの広範検索
 
-High-level flow
-1) Triggered by SNS (CloudWatch Alarm notification). Non-SNS events are rejected.
-2) Parse the embedded CloudWatch Alarm message (Sns.Message JSON).
-3) From message.Trigger, resolve (Namespace, MetricName) candidates.
-4) Use Logs:DescribeMetricFilters to find the matching metric filter and its logGroupName and filterPattern.
-5) Normalize the filter pattern for Logs:FilterLogEvents.
-6) Extract the evaluated datapoint timestamp from message.NewStateReason and query log events in that 5-minute window.
-7) Compose a human-readable email body that includes both standard alarm info and any extracted log lines.
-8) Publish the email body to the EMAIL_SNS_TOPIC_ARN (configured by CDK).
+処理の全体像
+1) SNS（CloudWatch アラーム通知）で起動。SNS以外のイベントは拒否します。
+2) SNSメッセージ（Sns.Message の JSON）を解析します。
+3) メッセージ内 Trigger から（Namespace, MetricName）の候補を収集します。
+4) Logs:DescribeMetricFilters で一致するメトリクスフィルターを逆引きし、logGroupName と filterPattern を取得します。
+5) フィルターパターンを Logs:FilterLogEvents 用に正規化します。
+6) NewStateReason に埋め込まれる評価データポイントの時刻を抽出し、その5分間のウィンドウでログを検索します。
+7) 標準のアラーム情報と抽出ログを含むメール本文を組み立てます。
+8) EMAIL_SNS_TOPIC_ARN（CDKで設定）へメール本文を Publish します。
 
-Notes
-- If Trigger is missing or a datapoint timestamp cannot be extracted, the function raises ValueError.
-- This design encourages accurate configuration of alarms and their SNS messages.
+注意
+- Trigger がない、またはデータポイント時刻を抽出できない場合は ValueError を送出して終了します。
+- 本設計は、アラームとSNSメッセージを正しく構成して運用する前提です。
 """
 
 import json
@@ -31,38 +31,38 @@ from typing import List, Dict, Any, Optional, Tuple
 
 
 def normalize_filter_pattern(pattern: Optional[str]) -> str:
-    """Normalize CloudWatch Logs filter patterns for filter_log_events.
+    """CloudWatch Logs の filter_log_events 用にフィルターパターンを正規化します。
 
-    What this does:
-    - Trims whitespace
-    - Removes a single pair of surrounding quotes ("…" or '…') when present
-    - Maps a common metric filter token "[error]" to a plain keyword search "error"
-      (CloudWatch Logs supports multiple syntaxes; this keeps behavior consistent)
+    具体的には：
+    - 前後の空白をトリム
+    - 文字列全体を一組の引用符（"…" または '…'）で囲んでいる場合は外す
+    - よくあるトークン "[error]" は単純キーワード検索の "error" に変換
+      （CloudWatch Logs には複数の記法があるため、動作の一貫性を保ちます）
     """
     if pattern is None:
         return ""
     p = str(pattern).strip()
-    # Remove a single surrounding quote pair (common when filters are defined as literal strings)
+    # 一組の外側クォートを取り除く（リテラルとして定義されたフィルタで発生しがち）
     if (p.startswith('"') and p.endswith('"')) or (p.startswith("'") and p.endswith("'")):
         p = p[1:-1].strip()
-    # Special-case legacy token
+    # レガシーなトークンを特別扱い
     if p.lower() == "[error]":
         return "error"
     return p
 
 
 def get_log_group_info_from_trigger(alarm_message: Dict[str, Any]) -> Dict[str, str]:
-    """Resolve logGroupName and filterPattern via Trigger in the SNS alarm message.
+    """SNSアラームメッセージ内の Trigger から、logGroupName / filterPattern を特定します。
 
-    Supports both forms:
-    - Simple metric alarm: Trigger.MetricName and Trigger.Namespace
-    - Metric math:        Trigger.Metrics[].MetricStat.Metric.{Namespace, MetricName}
+    対応パターン：
+    - 単純メトリック: Trigger.MetricName と Trigger.Namespace
+    - メトリックマス: Trigger.Metrics[].MetricStat.Metric.{Namespace, MetricName}
 
-    Returns
+    戻り値
     - { 'log_group_name': str, 'filter_pattern': str }
 
-    Raises
-    - ValueError: if Trigger is missing or no matching metric filters are found
+    例外
+    - Trigger が無い、または一致するメトリクスフィルタが見つからない場合は ValueError
     """
     trigger = alarm_message.get("Trigger")
     if not trigger:
@@ -70,11 +70,11 @@ def get_log_group_info_from_trigger(alarm_message: Dict[str, Any]) -> Dict[str, 
 
     candidates: List[Tuple[str, str]] = []
 
-    # Simple metric path
+    # 単純メトリック
     if isinstance(trigger, dict) and "MetricName" in trigger and "Namespace" in trigger:
         candidates.append((trigger.get("Namespace"), trigger.get("MetricName")))
 
-    # Metric-math path: collect any MetricStat.Metric entries
+    # メトリックマス（数式）
     metrics = trigger.get("Metrics") if isinstance(trigger, dict) else None
     if isinstance(metrics, list):
         for m in metrics:
@@ -92,7 +92,7 @@ def get_log_group_info_from_trigger(alarm_message: Dict[str, Any]) -> Dict[str, 
     if not candidates:
         raise ValueError("No metric candidates found in Trigger")
 
-    # Query CloudWatch Logs for metric filters that publish the given (Namespace, MetricName)
+    # 候補（Namespace, MetricName）で CloudWatch Logs のメトリクスフィルタを逆引き
     logs_client = boto3.client("logs")
     found_filters: List[Dict[str, Any]] = []
     for ns, mn in candidates:
@@ -100,13 +100,13 @@ def get_log_group_info_from_trigger(alarm_message: Dict[str, Any]) -> Dict[str, 
             resp = logs_client.describe_metric_filters(metricName=mn, metricNamespace=ns)
             found_filters.extend(resp.get("metricFilters", []))
         except Exception as e:
-            # Continue searching other candidate metrics
+            # 他の候補で継続
             print(f"describe_metric_filters error for {ns}/{mn}: {e}")
 
     if not found_filters:
         raise ValueError("No metric filters matched by Trigger's metrics")
 
-    # Assume the first match corresponds to the alarm's filter
+    # 最初に一致したフィルタを採用（一般的に一意のはず）
     chosen = found_filters[0]
     return {
         "log_group_name": chosen.get("logGroupName"),
@@ -115,15 +115,15 @@ def get_log_group_info_from_trigger(alarm_message: Dict[str, Any]) -> Dict[str, 
 
 
 def extract_datapoint_timestamp_from_reason(state_reason: str) -> Optional[str]:
-    """Extract an evaluated datapoint timestamp (ISO8601) from NewStateReason.
+    """NewStateReason から評価データポイントの時刻（ISO8601）を抽出します。
 
-    CloudWatch embeds datapoint info in messages like:
+    CloudWatch のメッセージ例：
     "Threshold Crossed: 1 datapoint [1.0 (28/08/25 04:22:00)] …"
 
-    This parser:
-    - Finds the DD/MM/YY HH:MM:SS inside parentheses
-    - Converts to a 4-digit year (assumes 20YY for YY<=50, else 19YY)
-    - Returns an ISO8601 string in UTC with millisecond precision
+    本処理：
+    - 括弧内の DD/MM/YY HH:MM:SS を抽出
+    - YY≦50 を 20YY、51≦YY を 19YY として4桁年に展開
+    - UTC の ISO8601（ミリ秒3桁固定）文字列で返却
     """
     if not state_reason:
         return None
@@ -132,7 +132,7 @@ def extract_datapoint_timestamp_from_reason(state_reason: str) -> Optional[str]:
         if not m:
             print(f"No timestamp pattern matched in: {state_reason}")
             return None
-        ts = m.group(1)  # e.g. "28/08/25 04:22:00"
+        ts = m.group(1)  # 例: "28/08/25 04:22:00"
         dd, mm, yy = ts.split(" ")[0].split("/")  # DD/MM/YY
         hhmmss = ts.split(" ")[1]
         full_year = f"20{yy}" if int(yy) <= 50 else f"19{yy}"
@@ -145,20 +145,20 @@ def extract_datapoint_timestamp_from_reason(state_reason: str) -> Optional[str]:
 
 
 def get_logs_from_datapoint_period(log_group_name: str, filter_pattern: str, datapoint_timestamp: str) -> List[Dict[str, Any]]:
-    """Fetch log events in the 5-minute window starting at the datapoint timestamp.
+    """データポイント時刻から5分間のウィンドウでログイベントを取得します。
 
-    Uses Logs:FilterLogEvents with the normalized filter pattern. Returns at most 10
-    newest events (sorted descending by event.timestamp).
+    Logs:FilterLogEvents に正規化済みパターンを渡して検索します。
+    新しい順に並べ替え、最大10件まで返します（メール本文の簡潔化のため）。
     """
     logs_client = boto3.client("logs")
     try:
-        # Convert ISO8601 timestamp to datetime and build the [t, t+300s] window
+        # ISO8601 → datetime に変換して [t, t+300s] ウィンドウを作成
         start_time = datetime.fromisoformat(datapoint_timestamp.replace("Z", "+00:00"))
         period_seconds = 300
         end_time = start_time + timedelta(seconds=period_seconds)
         print(f"Searching logs from {start_time} to {end_time} (period: {period_seconds}s)")
 
-        # Normalize pattern and search
+        # パターンを正規化して検索
         search_pattern = normalize_filter_pattern(filter_pattern)
         resp = logs_client.filter_log_events(
             logGroupName=log_group_name,
@@ -169,7 +169,7 @@ def get_logs_from_datapoint_period(log_group_name: str, filter_pattern: str, dat
         )
         events = resp.get("events", [])
 
-        # Newest first; return up to 10 for mail body brevity
+        # 新しい順に並べ替えて最大10件
         events.sort(key=lambda x: x["timestamp"], reverse=True)
         print(f"Found {len(events)} logs in datapoint period")
         return events[:10]
@@ -190,18 +190,18 @@ def generate_email_content(
     new_state: Optional[str] = None,
     alarm_arn: Optional[str] = None,
 ) -> Tuple[str, str]:
-    """Builds subject and body of the notification email.
+    """通知メールの件名と本文を組み立てます。
 
-    Includes:
-    - Standard CloudWatch alarm header in English (Console-like)
-    - Brief alarm details (name/desc/time/reason/account/region)
-    - Extracted error log lines (if any)
-    - A console link to the alarm, plus best-effort threshold/action blocks
+    含まれる内容：
+    - 英語の標準ヘッダ（コンソール表示に近い説明）
+    - アラームの詳細（名前/説明/時刻/理由/アカウント/リージョン）
+    - 抽出したエラーログ（存在する場合）
+    - コンソールへのリンク、しきい値/アクションの参考情報（ベストエフォート）
     """
     region_code = os.environ.get("AWS_REGION", "ap-northeast-1")
     region_long = {"ap-northeast-1": "Asia Pacific (Tokyo)"}.get(region_code, region_code)
 
-    # Account resolution is best-effort for the email body; failures are tolerated
+    # アカウントIDの解決（メール本文の補助情報。失敗しても致命的ではない）
     try:
         sts = boto3.client("sts")
         account_id = sts.get_caller_identity().get("Account", "unknown")
@@ -228,7 +228,7 @@ def generate_email_content(
         f"- Region: {region_code}\n"
     )
 
-    # Append extracted error logs (if any)
+    # 抽出したエラーログ（あれば追記）
     body_extra = "\n【検出されたエラーログ（追加情報）】\n"
     if error_logs:
         body_extra += f"アラーム発生のメトリクス期間（5分間）で {len(error_logs)} 件のエラーが検出されました:\n\n"
@@ -243,7 +243,7 @@ def generate_email_content(
     else:
         body_extra += "詳細なエラーログの取得に失敗しました。\n\n"
 
-    # Console link to the alarm
+    # アラームのコンソールリンク
     import urllib.parse
     encoded_alarm_name = urllib.parse.quote(alarm_name, safe="")
     alarm_console_link = (
@@ -251,7 +251,7 @@ def generate_email_content(
         f"https://console.aws.amazon.com/cloudwatch/home?region={region_code}#alarmsV2:alarm/{encoded_alarm_name}\n\n"
     )
 
-    # Best-effort blocks about threshold and actions (optional context for recipients)
+    # しきい値/アクションの参考情報（ベストエフォート）
     try:
         cw = boto3.client("cloudwatch")
         resp = cw.describe_alarms(AlarmNames=[alarm_name])
@@ -314,7 +314,7 @@ def generate_email_content(
             "State Change Actions:\n- OK: None\n- ALARM: None\n- INSUFFICIENT_DATA: None\n\n"
         )
 
-    # Unsubscribe caution for recipients (operational safety)
+    # 受信者向けの注意喚起（運用上の安全のため）
     caution_block = (
         "【重要】購読解除に関する注意\n"
         "本メールの末尾に表示される Amazon SNS の unsubscribe リンクをクリックすると、"
@@ -326,23 +326,23 @@ def generate_email_content(
 
 
 def send_notification(sns_topic_arn: str, subject: str, body: str) -> None:
-    """Publish the composed email to the configured SNS topic."""
+    """組み立てたメール本文を設定済み SNS トピックに Publish します。"""
     sns_client = boto3.client("sns")
     resp = sns_client.publish(TopicArn=sns_topic_arn, Subject=subject, Message=body)
     print(f"Notification sent successfully. MessageId: {resp['MessageId']}")
 
 
 def process_alarm_event(alarm_data: Dict[str, Any]) -> None:
-    """Process one CloudWatch Alarm message (already extracted from SNS).
+    """SNSメッセージから取り出した CloudWatch アラーム1件を処理します。
 
-    Steps
-    1) Validate required fields and ALARM state
-    2) Resolve (log_group_name, filter_pattern) from Trigger via Logs:DescribeMetricFilters
-    3) Extract datapoint timestamp from NewStateReason
-    4) Fetch error logs for the datapoint window
-    5) Compose and publish the notification email
+    手順
+    1) 必須フィールドと ALARM 状態の検証
+    2) Trigger から Logs:DescribeMetricFilters で logGroupName / filterPattern を解決
+    3) NewStateReason からデータポイント時刻を抽出
+    4) データポイントのウィンドウでログ抽出
+    5) メール本文を組み立て、Publish
     """
-    # 1) Validate email destination and input fields
+    # 1) 出力先と入力の検証
     email_sns_topic_arn = os.environ.get("EMAIL_SNS_TOPIC_ARN")
     if not email_sns_topic_arn:
         raise ValueError("EMAIL_SNS_TOPIC_ARN environment variable not set")
@@ -362,25 +362,25 @@ def process_alarm_event(alarm_data: Dict[str, Any]) -> None:
         print("State is not ALARM. Skipping.")
         return
 
-    # 2) Resolve log group and filter pattern from Trigger
+    # 2) Trigger からロググループとフィルターを解決
     info = get_log_group_info_from_trigger(alarm_data)
     log_group_name = info["log_group_name"]
     filter_pattern = normalize_filter_pattern(info.get("filter_pattern", ""))
     print(f"Resolved from Trigger - Log Group: {log_group_name}")
     print(f"Resolved from Trigger - Filter Pattern: {filter_pattern}")
 
-    # 3) Extract datapoint timestamp (required)
+    # 3) データポイントの時刻を抽出（必須）
     dp_ts = extract_datapoint_timestamp_from_reason(reason)
     print(f"Extracted datapoint timestamp: {dp_ts}")
     if not dp_ts:
         raise ValueError("Failed to extract datapoint timestamp from alarm reason")
 
-    # 4) Fetch logs for the datapoint window
+    # 4) データポイントのウィンドウでログ抽出
     error_logs = get_logs_from_datapoint_period(log_group_name, filter_pattern, dp_ts)
     for i, log in enumerate(error_logs[:3]):
         print(f"Log {i+1}: {log.get('message', '')[:100]}...")
 
-    # 5) Compose email and publish
+    # 5) メール本文を組み立てて送信
     subject, body = generate_email_content(
         alarm_name,
         alarm_description,
@@ -400,11 +400,11 @@ def process_alarm_event(alarm_data: Dict[str, Any]) -> None:
 
 
 def lambda_handler(event, context):
-    """Entrypoint. Only SNS events are supported.
+    """エントリポイント。SNSイベントのみ受け付けます。
 
-    - Prints basic diagnostics for observability
-    - Iterates SNS Records and invokes process_alarm_event() for each message
-    - Raises an error if the event is not SNS-based
+    - 監視性のため、入力イベントの基本情報をログ出力
+    - SNS Records を走査し、各メッセージに対して process_alarm_event() を呼び出し
+    - SNS 以外のイベントは例外を送出
     """
     print("=== LAMBDA FUNCTION STARTED ===")
     print(f"Event type: {type(event)}")
@@ -412,18 +412,18 @@ def lambda_handler(event, context):
     print("=== EVENT RECEIVED ===")
     print(json.dumps(event, indent=2, default=str))
 
-    # Guard: only SNS events are acceptable
+    # ガード：SNS イベントのみ受理
     if not (isinstance(event, dict) and "Records" in event):
         print("Unsupported event: expected SNS Records. Aborting.")
         raise ValueError("Unsupported event source. This function must be invoked via SNS.")
 
-    # Environment sanity check for the outbound topic
+    # 出力先トピックの健全性チェック
     email_sns_topic_arn = os.environ.get("EMAIL_SNS_TOPIC_ARN")
     print(f"EMAIL_SNS_TOPIC_ARN: {email_sns_topic_arn}")
     if not email_sns_topic_arn:
         raise ValueError("EMAIL_SNS_TOPIC_ARN environment variable not set")
 
-    # Process each SNS record
+    # 各SNSレコードを処理
     for i, record in enumerate(event["Records"]):
         print(f"Record {i}: EventSource = {record.get('EventSource', 'Unknown')}")
         if record.get("EventSource") != "aws:sns":
