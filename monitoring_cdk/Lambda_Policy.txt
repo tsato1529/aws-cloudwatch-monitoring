@@ -1,0 +1,26 @@
+{
+	"Version": "2012-10-17",
+	"Statement": [
+		{
+			"Action": [
+				"logs:FilterLogEvents",
+			],
+			"Resource": "arn:aws:logs:ap-northeast-1:<ACCOUNT_ID>:log-group:*",
+			"Effect": "Allow"
+		},
+		{
+			"Action": [
+				"cloudwatch:DescribeAlarms",
+				"logs:DescribeLogGroups",
+				"logs:DescribeMetricFilters"
+			],
+			"Resource": "*",
+			"Effect": "Allow"
+		},
+		{
+			"Action": "sns:Publish",
+			"Resource": "arn:aws:sns:ap-northeast-1:542567375811:LS-AWSLAB-ErrorNotificationEmail",
+			"Effect": "Allow"
+		}
+	]
+}
