@@ -216,16 +216,20 @@ def generate_email_content(
     if error_logs:
         # datapoint_ts_iso & period_seconds が来ていれば、[t - period, t] の表示レンジを作る
         if datapoint_ts_iso and period_seconds:
-            end_dt_utc = datetime.fromisoformat(datapoint_ts_iso.replace("Z", "+00:00"))
-            start_dt_utc = end_dt_utc - timedelta(seconds=period_seconds)
-            
-            start_local = start_dt_utc.astimezone(display_tz)
-            end_local = end_dt_utc.astimezone(display_tz)
-            
-            window_start = start_local.strftime("%H:%M")
-            window_end = end_local.strftime("%H:%M")
+            start_dt_utc = datetime.fromisoformat(datapoint_ts_iso.replace("Z", "+00:00"))
+            end_dt_utc   = start_dt_utc + timedelta(seconds=period_seconds)
 
-            body_extra += f"{window_start} ~ {window_end} の間に {len(error_logs)} 件のエラーが検出されました:\n\n"
+            # 表示用タイムゾーンに変換
+            start_local = start_dt_utc.astimezone(display_tz)
+            end_local   = end_dt_utc.astimezone(display_tz)
+
+            window_start = start_local.strftime("%Y-%m-%d %H:%M")  # ★日付+時刻
+            window_end   = end_local.strftime("%Y-%m-%d %H:%M")    # ★日付+時刻
+
+            body_extra += (
+                f"{window_start} ~ {window_end} の間に "
+                f"{len(error_logs)} 件のエラーが検出されました:\n\n"
+            )"
         else:
             body_extra += f"直近のメトリクス期間に {len(error_logs)} 件のエラーが検出されました:\n\n"
 
