@@ -30,27 +30,18 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-
 def normalize_filter_pattern(pattern: Optional[str]) -> str:
-    """CloudWatch Logs の filter_log_events 用にフィルターパターンを正規化する
-
-    具体的には：
-    - 前後の空白をトリム
-    - 文字列全体を一組の引用符（"…" または '…'）で囲んでいる場合は外す
-    - よくあるトークン "[error]" は単純キーワード検索の "error" に変換
-      （CloudWatch Logs には複数の記法があるため、動作の一貫性を保ちます）
-    """
-    if pattern is None:
+    if not pattern:
         return ""
-    p = str(pattern).strip()
-    # 一組の外側クォートを取り除く（リテラルとして定義されたフィルタで発生しがち）
-    if (p.startswith('"') and p.endswith('"')) or (p.startswith("'") and p.endswith("'")):
-        p = p[1:-1].strip()
-    # フィルタパターンに[]が存在する場合、それを削除
-    if p.startswith("[") and p.endswith("]"):
-        return p[1:-1]
-    return p
 
+    p = str(pattern).strip()
+
+    # もし外側がクォートで、さらに内側もクォートされているなら外す
+    if (p.startswith('"') and p.endswith('"')) or (p.startswith("'") and p.endswith("'")):
+        inner = p[1:-1].strip()
+        if (inner.startswith('"') and inner.endswith('"')) or (inner.startswith("'") and inner.endswith("'")):
+            return inner[1:-1].strip()
+    return p
 
 def get_log_group_info_from_trigger(alarm_message: Dict[str, Any]) -> Dict[str, str]:
     """SNSアラームメッセージ内の Trigger から、logGroupName / filterPattern を特定する
