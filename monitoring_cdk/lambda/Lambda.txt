@@ -36,11 +36,16 @@ def normalize_filter_pattern(pattern: Optional[str]) -> str:
 
     p = str(pattern).strip()
 
-    # もし外側がクォートで、さらに内側もクォートされているなら外す
+    # 二重クォートなら外す
     if (p.startswith('"') and p.endswith('"')) or (p.startswith("'") and p.endswith("'")):
         inner = p[1:-1].strip()
         if (inner.startswith('"') and inner.endswith('"')) or (inner.startswith("'") and inner.endswith("'")):
             return inner[1:-1].strip()
+    return p
+
+    if re.search(r'[(){}[\]:"]', p):
+        return f'"{p}"'
+
     return p
 
 def get_log_group_info_from_trigger(alarm_message: Dict[str, Any]) -> Dict[str, str]:
@@ -131,7 +136,6 @@ def get_logs_from_datapoint_period(
     try:
         # ISO8601 → datetime に変換して [t, t+300s] ウィンドウを作成
         start_time = datetime.fromisoformat(datapoint_timestamp.replace("Z", "+00:00"))
-        period_seconds = 300
         end_time = start_time + timedelta(seconds=period_seconds)
         print(f"Searching logs from {start_time} to {end_time} (period: {period_seconds}s)")
 
@@ -223,13 +227,13 @@ def generate_email_content(
             start_local = start_dt_utc.astimezone(display_tz)
             end_local   = end_dt_utc.astimezone(display_tz)
 
-            window_start = start_local.strftime("%Y-%m-%d %H:%M")  # ★日付+時刻
-            window_end   = end_local.strftime("%Y-%m-%d %H:%M")    # ★日付+時刻
+            window_start = start_local.strftime("%Y-%m-%d %H:%M")
+            window_end   = end_local.strftime("%Y-%m-%d %H:%M")
 
             body_extra += (
                 f"{window_start} ~ {window_end} の間に "
                 f"{len(error_logs)} 件のエラーが検出されました:\n\n"
-            )"
+            )
         else:
             body_extra += f"直近のメトリクス期間に {len(error_logs)} 件のエラーが検出されました:\n\n"
 
