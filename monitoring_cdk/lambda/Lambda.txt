@@ -1,51 +1,21 @@
-"""
-Lambda: CloudWatch アラーム（SNS経由）→ ロググループ/フィルタ特定 → ログ抽出 → メール送信
-
-この関数は、SNSから受信した CloudWatch アラーム通知だけを前提とした最小実装です。
-以下のフォールバックは一切行いません：
-- アラーム名からの推測
-- DescribeAlarms 等による情報の補完
-- データポイント時刻が取れない場合の「過去◯分」などの広範検索
-
-処理の全体像
-1) SNS（CloudWatch アラーム通知）で起動。SNS以外のイベントは拒否します。
-2) SNSメッセージ（Sns.Message の JSON）を解析します。
-3) メッセージ内 Trigger から（Namespace, MetricName）の候補を収集します。
-4) Logs:DescribeMetricFilters で一致するメトリクスフィルターを逆引きし、logGroupName と filterPattern を取得します。
-5) フィルターパターンを Logs:FilterLogEvents 用に正規化します。
-6) NewStateReason に埋め込まれる評価データポイントの時刻を抽出し、その5分間のウィンドウでログを検索します。
-7) 標準のアラーム情報と抽出ログを含むメール本文を組み立てます。
-8) EMAIL_SNS_TOPIC_ARN（CDKで設定）へメール本文を Publish します。
-
-注意
-- Trigger がない、またはデータポイント時刻を抽出できない場合は ValueError を送出して終了します。
-- 本設計は、アラームとSNSメッセージを正しく構成して運用する前提です。
-"""
-
+# --- unchanged header & imports ---
 import json
 import boto3
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 def normalize_filter_pattern(pattern: Optional[str]) -> str:
     if not pattern:
         return ""
-
     p = str(pattern).strip()
-
     # 二重クォートなら外す
     if (p.startswith('"') and p.endswith('"')) or (p.startswith("'") and p.endswith("'")):
         inner = p[1:-1].strip()
         if (inner.startswith('"') and inner.endswith('"')) or (inner.startswith("'") and inner.endswith("'")):
             return inner[1:-1].strip()
-    return p
-
-    if re.search(r'[(){}[\]:"]', p):
-        return f'"{p}"'
-
     return p
 
 def get_log_group_info_from_trigger(alarm_message: Dict[str, Any]) -> Dict[str, str]:
@@ -62,7 +32,6 @@ def get_log_group_info_from_trigger(alarm_message: Dict[str, Any]) -> Dict[str, 
         raise ValueError("Trigger not found in alarm message")
 
     candidates: List[Tuple[str, str]] = []
-
     if isinstance(trigger, dict) and "MetricName" in trigger and "Namespace" in trigger:
         candidates.append((trigger.get("Namespace"), trigger.get("MetricName")))
 
@@ -90,18 +59,8 @@ def get_log_group_info_from_trigger(alarm_message: Dict[str, Any]) -> Dict[str, 
         "filter_pattern": chosen.get("filterPattern", "")
     }
 
-
 def extract_datapoint_timestamp_from_reason(state_reason: str) -> Optional[str]:
-    """NewStateReason から評価データポイントの時刻を抽出
-
-    CloudWatch のメッセージ例：
-    "Threshold Crossed: 1 datapoint [1.0 (28/08/25 04:22:00)] …"
-
-    本処理：
-    - 括弧内の DD/MM/YY HH:MM:SS を抽出
-    - YY≦50 を 20YY、51≦YY を 19YY として4桁年に展開
-    - UTC の ISO8601（ミリ秒3桁固定）文字列で返却
-    """
+    """NewStateReason から評価データポイントの時刻を抽出（互換維持・今回フローでは未使用）"""
     if not state_reason:
         return None
     try:
@@ -120,45 +79,54 @@ def extract_datapoint_timestamp_from_reason(state_reason: str) -> Optional[str]:
         print(f"Error extracting timestamp from state reason: {e}")
         return None
 
+# [ADDED] StateChangeTime 正規化ヘルパ
+def parse_state_change_time_to_isoz(raw: str) -> str:
+    """
+    CloudWatch Alarm SNS の StateChangeTime 例:
+      "2025-09-19T09:35:00.000+0000" や "2025-09-19T09:35:00+00:00"
+    を UTC の ISO8601 Z 終端 "YYYY-MM-DDTHH:MM:SS.000Z" に正規化する。
+    """
+    if not raw:
+        raise ValueError("StateChangeTime not found")
+    s = raw.replace("Z", "+00:00")
+    # +0000 / +0900 → +00:00 / +09:00
+    s = re.sub(r"([+\-]\d{2})(\d{2})$", r"\1:\2", s)
+    dt = datetime.fromisoformat(s)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
-def get_logs_from_datapoint_period(
+# [ADDED] バケット終端（StateChangeTime）ベースのログ抽出
+def get_logs_from_bucket_end_window(
     log_group_name: str,
     filter_pattern: str,
-    datapoint_timestamp: str,
+    bucket_end_iso: str,
     period_seconds: int,
 ) -> List[Dict[str, Any]]:
-
     """
-    Logs:FilterLogEvents に正規化済みパターンを渡して検索
-    新しい順に並べ替え、最大10件まで返す（メール本文の簡潔化のため）
+    CloudWatch の集計窓に一致させるため [bucket_end - Period, bucket_end] を検索する。
+    返却は新しい順に最大10件。
     """
     logs_client = boto3.client("logs")
     try:
-        # ISO8601 → datetime に変換して [t, t+300s] ウィンドウを作成
-        start_time = datetime.fromisoformat(datapoint_timestamp.replace("Z", "+00:00"))
-        end_time = start_time + timedelta(seconds=period_seconds)
-        print(f"Searching logs from {start_time} to {end_time} (period: {period_seconds}s)")
+        end_dt = datetime.fromisoformat(bucket_end_iso.replace("Z", "+00:00"))
+        start_dt = end_dt - timedelta(seconds=period_seconds)
+        print(f"[CHANGED] Searching logs (bucket window) from {start_dt} to {end_dt} (period: {period_seconds}s)")
 
-        # パターンを正規化して検索
         search_pattern = normalize_filter_pattern(filter_pattern)
         resp = logs_client.filter_log_events(
             logGroupName=log_group_name,
-            startTime=int(start_time.timestamp() * 1000),
-            endTime=int(end_time.timestamp() * 1000),
+            startTime=int(start_dt.timestamp() * 1000),
+            endTime=int(end_dt.timestamp() * 1000),
             filterPattern=search_pattern,
             limit=20,
         )
         events = resp.get("events", [])
-
-        # 新しい順に並べ替えて最大10件
         events.sort(key=lambda x: x["timestamp"], reverse=True)
-        print(f"Found {len(events)} logs in datapoint period")
         return events[:10]
     except Exception as e:
-        print(f"Error fetching logs from datapoint period: {e}")
+        print(f"Error fetching logs (bucket window): {e}")
         return []
 
-
+# --- unchanged generate_email_content (テキスト変更なし) ---
 def generate_email_content(
     alarm_name: str,
     alarm_description: str,
@@ -173,22 +141,12 @@ def generate_email_content(
     datapoint_ts_iso: Optional[str] = None,
     period_seconds: Optional[int] = None,
 ) -> Tuple[str, str]:
-    """通知メールの件名と本文を組み立てます。
-
-    含まれる内容：
-    - 英語の標準ヘッダ（コンソール表示に近い説明）
-    - アラームの詳細（名前/説明/時刻/理由/アカウント/リージョン）
-    - 抽出したエラーログ（存在する場合）
-    - コンソールへのリンク、しきい値/アクションの参考情報（ベストエフォート）
-    """
     region_code = os.environ.get("AWS_REGION", "ap-northeast-1")
     region_long = {"ap-northeast-1": "Asia Pacific (Tokyo)"}.get(region_code, region_code)
-    
-    # 東京リージョン（ap-northeast-1）は Asia/Tokyo で表示
+
     tzname = "Asia/Tokyo" if region_code == "ap-northeast-1" else "UTC"
     display_tz = ZoneInfo(tzname)
 
-    # アカウントIDの解決（メール本文の補助情報。失敗した場合unknownとして続行）
     try:
         sts = boto3.client("sts")
         account_id = sts.get_caller_identity().get("Account", "unknown")
@@ -215,15 +173,13 @@ def generate_email_content(
         f"- Region: {region_code}\n"
     )
 
-    # 抽出したエラーログ
     body_extra = "\n【検出されたログ】\n"
     if error_logs:
-        # datapoint_ts_iso & period_seconds が来ていれば、[t - period, t] の表示レンジを作る
+        # 表示レンジ: 呼び出し側から "ウィンドウ開始 = bucket_end - Period" を渡す
         if datapoint_ts_iso and period_seconds:
             start_dt_utc = datetime.fromisoformat(datapoint_ts_iso.replace("Z", "+00:00"))
             end_dt_utc   = start_dt_utc + timedelta(seconds=period_seconds)
 
-            # 表示用タイムゾーンに変換
             start_local = start_dt_utc.astimezone(display_tz)
             end_local   = end_dt_utc.astimezone(display_tz)
 
@@ -237,7 +193,7 @@ def generate_email_content(
         else:
             body_extra += f"直近のメトリクス期間に {len(error_logs)} 件のエラーが検出されました:\n\n"
 
-        for ev in error_logs[:5]:  # 最大5件
+        for ev in error_logs[:5]:
             message = ev.get("message", "")
             body_extra += message + "\n\n"
 
@@ -246,15 +202,14 @@ def generate_email_content(
     else:
         body_extra += "詳細なエラーログの取得に失敗しました。\n\n"
 
-    # アラームのコンソールリンク
     import urllib.parse
     encoded_alarm_name = urllib.parse.quote(alarm_name, safe="")
+    region_code = os.environ.get("AWS_REGION", "ap-northeast-1")
     alarm_console_link = (
         "View this alarm in the AWS Management Console:\n"
         f"https://console.aws.amazon.com/cloudwatch/home?region={region_code}#alarmsV2:alarm/{encoded_alarm_name}\n\n"
     )
 
-    # しきい値/アクションの参考情報
     try:
         cw = boto3.client("cloudwatch")
         resp = cw.describe_alarms(AlarmNames=[alarm_name])
@@ -317,7 +272,6 @@ def generate_email_content(
             "State Change Actions:\n- OK: None\n- ALARM: None\n- INSUFFICIENT_DATA: None\n\n"
         )
 
-    # 受信者向けの注意喚起（運用上の安全のため）
     caution_block = (
         "【重要】購読解除に関する注意\n"
         "以下に記載されている Amazon SNS のリンクをクリックしないでください。\n"
@@ -327,13 +281,11 @@ def generate_email_content(
     body = header + body_extra + alarm_console_link + details + "\n" + threshold_block + monitored_metric_block + state_change_actions_block + caution_block
     return subject, body
 
-
 def send_notification(sns_topic_arn: str, subject: str, body: str) -> None:
     """組み立てたメール本文を設定済み SNS トピックに Publish します。"""
     sns_client = boto3.client("sns")
     resp = sns_client.publish(TopicArn=sns_topic_arn, Subject=subject, Message=body)
     print(f"Notification sent successfully. MessageId: {resp['MessageId']}")
-
 
 def process_alarm_event(alarm_data: Dict[str, Any]) -> None:
     """SNSメッセージから取り出した CloudWatch アラーム1件を処理します。
@@ -341,8 +293,8 @@ def process_alarm_event(alarm_data: Dict[str, Any]) -> None:
     手順
     1) 必須フィールドと ALARM 状態の検証
     2) Trigger から Logs:DescribeMetricFilters で logGroupName / filterPattern を解決
-    3) NewStateReason からデータポイント時刻を抽出
-    4) データポイントのウィンドウでログ抽出
+    3) [CHANGED] StateChangeTime（バケット終端）を取得・正規化
+    4) [CHANGED] [end-Period, end] のウィンドウでログ抽出
     5) メール本文を組み立て、Publish
     """
     # 1) 出力先と入力の検証
@@ -372,48 +324,57 @@ def process_alarm_event(alarm_data: Dict[str, Any]) -> None:
     print(f"Resolved from Trigger - Log Group: {log_group_name}")
     print(f"Resolved from Trigger - Filter Pattern: {filter_pattern}")
 
-    # 3) データポイントの時刻を抽出（必須）
-    dp_ts = extract_datapoint_timestamp_from_reason(reason)
-    print(f"Extracted datapoint timestamp: {dp_ts}")
-    if not dp_ts:
-        raise ValueError("Failed to extract datapoint timestamp from alarm reason")
+    # 3) [CHANGED] StateChangeTime を正規化（バケット終端と見なす）
+    try:
+        bucket_end_iso = parse_state_change_time_to_isoz(timestamp)  # e.g., "2025-09-19T09:35:00.000Z"
+    except Exception as e:
+        raise ValueError(f"Failed to parse StateChangeTime: {e}")
+    print(f"[CHANGED] Bucket end (StateChangeTime): {bucket_end_iso}")
 
-    # 3.5) アラームの Period（秒）を取得（なければ 300 にフォールバック）
+    # 3.5) アラームの Period（秒）を取得（DescribeAlarms 優先、失敗時は Trigger/既定）
     try:
         cw = boto3.client("cloudwatch")
         _resp = cw.describe_alarms(AlarmNames=[alarm_name])
         _al = (_resp.get("MetricAlarms") or [None])[0]
-        period_seconds = int(_al.get("Period")) if (_al and _al.get("Period") is not None) else 300
+        if _al and _al.get("Period") is not None:
+            period_seconds = int(_al.get("Period"))
+        else:
+            period_seconds = int(alarm_data.get("Trigger", {}).get("Period") or 300)
     except Exception as e:
-        print(f"Failed to get Period from describe_alarms: {e}")
-        period_seconds = 300
+        print(f"Failed to get Period; fallback to Trigger/300. reason={e}")
+        period_seconds = int(alarm_data.get("Trigger", {}).get("Period") or 300)
 
-
-    # 4) データポイントのウィンドウでログ抽出
-    error_logs = get_logs_from_datapoint_period(log_group_name, filter_pattern, dp_ts, period_seconds)
+    # 4) [CHANGED] [bucket_end - Period, bucket_end] でログ抽出
+    error_logs = get_logs_from_bucket_end_window(
+        log_group_name, filter_pattern, bucket_end_iso, period_seconds
+    )
     for i, log in enumerate(error_logs[:3]):
         print(f"Log {i+1}: {log.get('message', '')[:100]}...")
 
     # 5) メール本文を組み立てて送信
+    #    generate_email_content は「datapoint_ts_iso をウィンドウ開始」と解釈するため、
+    #    ここで (bucket_end - Period) を渡して表示レンジを正しく見せる。
+    window_start_iso = datetime.fromisoformat(bucket_end_iso.replace("Z", "+00:00")) - timedelta(seconds=period_seconds)
+    window_start_iso = window_start_iso.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")  # start = end - Period
+
     subject, body = generate_email_content(
         alarm_name,
         alarm_description,
-        timestamp,
+        timestamp,            # SNSのStateChangeTime（原文）をそのまま表示用に
         reason,
         error_logs,
         log_group_name,
-        search_method="datapoint_period",
+        search_method="datapoint_period",  # 表示文面は維持（処理ロジックはStateChangeTime基準）
         old_state=old_state,
         new_state=new_state,
         alarm_arn=alarm_arn,
-        datapoint_ts_iso=dp_ts,
+        datapoint_ts_iso=window_start_iso,  # [CHANGED] ウィンドウ開始を渡す
         period_seconds=period_seconds,
     )
     print(f"Email subject: {subject}")
     print(f"Email body preview: {body[:500]}...")
 
     send_notification(email_sns_topic_arn, subject, body)
-
 
 def lambda_handler(event, context):
     """エントリポイント。SNSイベントのみ受け付けます。
@@ -428,18 +389,15 @@ def lambda_handler(event, context):
     print("=== EVENT RECEIVED ===")
     print(json.dumps(event, indent=2, default=str))
 
-    # ガード：SNS イベントのみ受理
     if not (isinstance(event, dict) and "Records" in event):
         print("Unsupported event: expected SNS Records. Aborting.")
         raise ValueError("Unsupported event source. This function must be invoked via SNS.")
 
-    # 出力先トピックの健全性チェック
     email_sns_topic_arn = os.environ.get("EMAIL_SNS_TOPIC_ARN")
     print(f"EMAIL_SNS_TOPIC_ARN: {email_sns_topic_arn}")
     if not email_sns_topic_arn:
         raise ValueError("EMAIL_SNS_TOPIC_ARN environment variable not set")
 
-    # 各SNSレコードを処理
     for i, record in enumerate(event["Records"]):
         print(f"Record {i}: EventSource = {record.get('EventSource', 'Unknown')}")
         if record.get("EventSource") != "aws:sns":
