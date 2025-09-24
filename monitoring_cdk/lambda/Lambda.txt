@@ -59,25 +59,6 @@ def get_log_group_info_from_trigger(alarm_message: Dict[str, Any]) -> Dict[str, 
         "filter_pattern": chosen.get("filterPattern", "")
     }
 
-def extract_datapoint_timestamp_from_reason(state_reason: str) -> Optional[str]:
-    """NewStateReason から評価データポイントの時刻を抽出（互換維持・今回フローでは未使用）"""
-    if not state_reason:
-        return None
-    try:
-        m = re.search(r"\((\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})\)", state_reason)
-        if not m:
-            print(f"No timestamp pattern matched in: {state_reason}")
-            return None
-        ts = m.group(1)  # 例: "28/08/25 04:22:00"
-        dd, mm, yy = ts.split(" ")[0].split("/")  # DD/MM/YY
-        hhmmss = ts.split(" ")[1]
-        full_year = f"20{yy}"
-        corrected = f"{full_year}/{mm}/{dd} {hhmmss}"
-        dt = datetime.strptime(corrected, "%Y/%m/%d %H:%M:%S")
-        return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    except Exception as e:
-        print(f"Error extracting timestamp from state reason: {e}")
-        return None
 
 # [ADDED] StateChangeTime 正規化ヘルパ
 def parse_state_change_time_to_isoz(raw: str) -> str:
@@ -108,7 +89,8 @@ def get_logs_from_bucket_end_window(
     logs_client = boto3.client("logs")
     try:
         end_dt = datetime.fromisoformat(bucket_end_iso.replace("Z", "+00:00"))
-        start_dt = end_dt - timedelta(seconds=period_seconds)
+        #監視間隔の2倍の時間を検索範囲とする
+        start_dt = end_dt - timedelta(seconds=period_seconds * 2)
         print(f"[CHANGED] Searching logs (bucket window) from {start_dt} to {end_dt} (period: {period_seconds}s)")
 
         search_pattern = normalize_filter_pattern(filter_pattern)
@@ -177,17 +159,10 @@ def generate_email_content(
     if error_logs:
         # 表示レンジ: 呼び出し側から "ウィンドウ開始 = bucket_end - Period" を渡す
         if datapoint_ts_iso and period_seconds:
-            start_dt_utc = datetime.fromisoformat(datapoint_ts_iso.replace("Z", "+00:00"))
-            end_dt_utc   = start_dt_utc + timedelta(seconds=period_seconds)
-
-            start_local = start_dt_utc.astimezone(display_tz)
-            end_local   = end_dt_utc.astimezone(display_tz)
-
-            window_start = start_local.strftime("%Y-%m-%d %H:%M")
-            window_end   = end_local.strftime("%Y-%m-%d %H:%M")
+            minutes = (period_seconds * 2) // 60
 
             body_extra += (
-                f"{window_start} ~ {window_end} の間に "
+                f"直近{minutes}分間に "
                 f"{len(error_logs)} 件のエラーが検出されました:\n\n"
             )
         else:
@@ -324,7 +299,7 @@ def process_alarm_event(alarm_data: Dict[str, Any]) -> None:
     print(f"Resolved from Trigger - Log Group: {log_group_name}")
     print(f"Resolved from Trigger - Filter Pattern: {filter_pattern}")
 
-    # 3) [CHANGED] StateChangeTime を正規化（バケット終端と見なす）
+    # 3)  StateChangeTime を正規化（バケット終端と見なす）
     try:
         bucket_end_iso = parse_state_change_time_to_isoz(timestamp)  # e.g., "2025-09-19T09:35:00.000Z"
     except Exception as e:
